@@ -1,0 +1,281 @@
+---
+title: "Agent tracing and runtime observability with LangSmith"
+description: "Instrument LangGraph agents with LangSmith to capture every LLM call, tool execution, and decision point — turning AI debugging from guesswork into data."
+---
+
+LangSmith acts as a flight recorder for your agents. Once you set `LANGCHAIN_TRACING_V2=true`, every LangGraph node execution, LLM call, and tool invocation is captured automatically — no manual instrumentation required. This page walks through environment setup, building a traceable agent, and reading the traces that LangSmith produces.
+
+<Info>
+You need a free LangSmith account at [smith.langchain.com](https://smith.langchain.com) and an OpenAI API key before starting.
+</Info>
+
+## Prerequisites
+
+<CardGroup cols={2}>
+  <Card title="Python 3.9+" icon="python">
+    Required runtime for LangGraph and LangSmith.
+  </Card>
+  <Card title="API keys" icon="key">
+    `OPENAI_API_KEY` and `LANGCHAIN_API_KEY` from your LangSmith account.
+  </Card>
+</CardGroup>
+
+Install the required packages:
+
+```bash
+pip install -U langchain-core langchain-openai langgraph langsmith requests
+```
+
+## Configure tracing
+
+Setting `LANGCHAIN_TRACING_V2=true` is the single switch that activates LangSmith. All LangGraph operations are intercepted and logged from this point forward.
+
+```python
+import os
+
+# Configure API keys - replace with your actual keys
+os.environ['OPENAI_API_KEY'] = ''
+os.environ['LANGCHAIN_API_KEY'] = ''
+os.environ['LANGCHAIN_TRACING_V2'] = 'true'  # This triggers observability
+os.environ['LANGCHAIN_PROJECT'] = 'langsmith-tutorial-demo'
+
+# Verify configuration
+required_vars = ['OPENAI_API_KEY', 'LANGCHAIN_API_KEY']
+for var in required_vars:
+    if not os.getenv(var) or 'your_' in os.getenv(var, ''):
+        print(f"Warning: {var} needs your actual key")
+    else:
+        print(f"✓ {var} configured")
+
+print(f"\nLangSmith Project: {os.getenv('LANGCHAIN_PROJECT')}")
+print("\nTracing is now active - all AI operations will be logged for analysis")
+```
+
+<Note>
+The `LANGCHAIN_PROJECT` variable groups traces into a named project in your dashboard. Use a descriptive name per environment (e.g., `production`, `staging`, `dev`).
+</Note>
+
+## Build a traceable agent
+
+### Define agent state
+
+Structured state gives LangSmith clear data to track as it flows through each node. Each field maps to a visible property in the trace viewer.
+
+```python
+from typing import TypedDict
+
+class AgentState(TypedDict):
+    """Simple state that flows through our agent workflow."""
+    user_question: str        # The original question from the user
+    needs_search: bool        # Whether we determined search is needed
+    search_result: str        # Result from our search tool (if used)
+    final_answer: str         # The response we'll give to the user
+    reasoning: str            # Why we made our decisions (great for observability)
+```
+
+### Create a tool
+
+The `@tool` decorator automatically wraps the function so LangSmith captures its inputs, outputs, and timing as a separate span.
+
+```python
+from langchain_core.tools import tool
+import requests
+
+@tool
+def wikipedia_search(query: str) -> str:
+    """Search Wikipedia for current information about a topic."""
+    try:
+        search_url = "https://en.wikipedia.org/w/api.php"
+        search_params = {
+            "action": "query",
+            "list": "search",
+            "srsearch": query,
+            "format": "json",
+            "srlimit": 3
+        }
+        response = requests.get(search_url, params=search_params, timeout=10)
+        if response.status_code == 200:
+            data = response.json()
+            search_results = data.get('query', {}).get('search', [])
+            if search_results:
+                top_result = search_results[0]
+                page_title = top_result['title']
+                summary_url = f"https://en.wikipedia.org/api/rest_v1/page/summary/{page_title.replace(' ', '_')}"
+                summary_response = requests.get(summary_url, timeout=10)
+                if summary_response.status_code == 200:
+                    extract = summary_response.json().get('extract', 'No summary available')
+                    return f"Found information about '{page_title}': {extract[:400]}..."
+        return f"Wikipedia search failed with status {response.status_code}"
+    except Exception as e:
+        return f"Search error: {str(e)}"
+```
+
+### Implement workflow nodes
+
+Each function is a separate node. LangSmith shows which nodes ran and in what order for every invocation.
+
+<Steps>
+  <Step title="Decide whether to search">
+    ```python
+    from langchain_core.messages import SystemMessage
+    from langchain_openai import ChatOpenAI
+
+    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+
+    def decide_search_need(state: AgentState) -> AgentState:
+        """Analyze the question and decide if we need to search for current information."""
+        decision_prompt = f"""
+        Analyze this question and decide if it requires current/recent information:
+
+        Question: "{state['user_question']}"
+
+        Respond with exactly "SEARCH" or "DIRECT".
+        Then on a new line, briefly explain your reasoning.
+        """
+        response = llm.invoke([SystemMessage(content=decision_prompt)])
+        lines = response.content.strip().split('\n')
+        decision = lines[0].strip()
+        reasoning = lines[1] if len(lines) > 1 else "No reasoning provided"
+
+        state["needs_search"] = decision == "SEARCH"
+        state["reasoning"] = f"Decision: {decision}. Reasoning: {reasoning}"
+        return state
+    ```
+  </Step>
+  <Step title="Execute search when needed">
+    ```python
+    def execute_search(state: AgentState) -> AgentState:
+        """Execute search if needed, otherwise skip this step."""
+        if not state["needs_search"]:
+            state["search_result"] = "No search performed"
+            return state
+
+        search_result = wikipedia_search.invoke({"query": state["user_question"]})
+        state["search_result"] = search_result
+        return state
+    ```
+  </Step>
+  <Step title="Generate the final response">
+    ```python
+    def generate_response(state: AgentState) -> AgentState:
+        """Generate the final response using all available information."""
+        if state["needs_search"] and "Search error" not in state.get("search_result", ""):
+            context = f"Question: {state['user_question']}\n\nSearch Results: {state['search_result']}"
+            response_prompt = f"Answer using both your knowledge and the search results.\n\n{context}"
+        else:
+            response_prompt = f"Answer this question: {state['user_question']}"
+
+        response = llm.invoke([SystemMessage(content=response_prompt)])
+        state["final_answer"] = response.content
+        return state
+    ```
+  </Step>
+  <Step title="Assemble the graph">
+    ```python
+    from langgraph.graph import StateGraph, END
+
+    workflow = StateGraph(AgentState)
+    workflow.add_node("decide", decide_search_need)
+    workflow.add_node("search", execute_search)
+    workflow.add_node("respond", generate_response)
+
+    workflow.set_entry_point("decide")
+    workflow.add_edge("decide", "search")
+    workflow.add_edge("search", "respond")
+    workflow.add_edge("respond", END)
+
+    simple_agent = workflow.compile()
+    ```
+  </Step>
+</Steps>
+
+## Run with metadata
+
+Attaching metadata and tags to each invocation lets you filter and group traces in LangSmith.
+
+```python
+import time
+
+def run_test_with_observability(question: str, test_type: str) -> dict:
+    """Run a test and capture comprehensive observability data."""
+    start_time = time.time()
+
+    initial_state = {
+        "user_question": question,
+        "needs_search": False,
+        "search_result": "",
+        "final_answer": "",
+        "reasoning": ""
+    }
+
+    config = {
+        "metadata": {
+            "test_type": test_type,
+            "tutorial": "langsmith-observability"
+        },
+        "tags": ["tutorial", "demo", test_type]
+    }
+
+    final_state = simple_agent.invoke(initial_state, config=config)
+    total_time = time.time() - start_time
+
+    return {
+        "question": question,
+        "type": test_type,
+        "used_search": final_state['needs_search'],
+        "total_time": round(total_time, 2),
+        "reasoning": final_state['reasoning']
+    }
+
+# Test cases covering three routing patterns
+test_cases = [
+    {"question": "What is the capital of France?",             "type": "direct_answer"},
+    {"question": "What happened in the 2024 US presidential election?", "type": "current_info"},
+    {"question": "Tell me about artificial intelligence",      "type": "factual_lookup"},
+]
+
+for i, tc in enumerate(test_cases, 1):
+    print(f"\nRunning test {i}/{len(test_cases)}")
+    result = run_test_with_observability(tc["question"], tc["type"])
+    time.sleep(1)
+```
+
+## Read the traces
+
+After running the tests, open your LangSmith dashboard and select the `langsmith-tutorial-demo` project. You will see:
+
+<Tabs>
+  <Tab title="Trace list">
+    A table of all executions with input, latency, cost, and success status. Sort by latency to identify slow queries or filter by tag to compare question types.
+  </Tab>
+  <Tab title="Trace detail">
+    A graph view of the workflow showing which nodes executed and how data flowed between them. Click any node to inspect its inputs, outputs, and duration.
+  </Tab>
+  <Tab title="LLM calls">
+    The exact prompt sent to the model and the raw response, including token counts and estimated cost per call.
+  </Tab>
+  <Tab title="Tool executions">
+    Every `wikipedia_search` invocation with the query, returned text, and elapsed time.
+  </Tab>
+</Tabs>
+
+<Tip>
+LangSmith aggregates latency, cost, and error rates across all runs. Use these aggregates to set alert thresholds before deploying to production.
+</Tip>
+
+## Key insights LangSmith surfaces
+
+<CardGroup cols={2}>
+  <Card title="Decision transparency" icon="eye">
+    See exactly why the agent chose to search or answer directly for each query — essential for debugging unexpected behavior.
+  </Card>
+  <Card title="Performance bottlenecks" icon="gauge">
+    Compare execution times across question types to identify whether search, decision-making, or response generation is the bottleneck.
+  </Card>
+  <Card title="Cost breakdown" icon="circle-dollar-sign">
+    Token usage and estimated cost per LLM call. Optimize expensive prompts without sacrificing quality.
+  </Card>
+  <Card title="Quality patterns" icon="chart-bar">
+    Spot systematic failures by filtering failed traces and comparing them against successful ones.
+  </Card>
+</CardGroup>

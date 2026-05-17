@@ -1,0 +1,374 @@
+---
+title: "Multi-agent coordination using the A2A open protocol"
+description: "Build interoperable agents with the A2A standard — define agent cards, implement executors, and exchange structured messages across independent services."
+---
+
+When a single agent isn't enough, you need a way for specialized agents to delegate work to each other — regardless of which framework, language, or vendor built them. The Agent2Agent (A2A) protocol provides that common language. This page demonstrates how to implement A2A agents using the `a2a-sdk`, wire them into a multi-agent workflow, and understand how A2A differs from and complements MCP.
+
+## A2A vs MCP
+
+<CardGroup cols={2}>
+  <Card title="MCP (Model Context Protocol)" icon="plug">
+    Standardizes how agents connect to tools, APIs, and data sources. It defines how an agent _uses_ a capability.
+  </Card>
+  <Card title="A2A (Agent2Agent Protocol)" icon="arrows-left-right">
+    Standardizes how independent agents communicate and collaborate as peers. It defines how agents _partner_ and _delegate_ work.
+  </Card>
+</CardGroup>
+
+The two protocols are complementary. An agent participating in an A2A interaction might use MCP internally to fulfill its part of the collaborative task.
+
+## Core A2A concepts
+
+| Concept | Description |
+|---|---|
+| **Agent Card** | JSON document at `/.well-known/agent.json` describing the agent's capabilities, skills, and how to communicate with it |
+| **Task Object** | Central data structure representing a unit of work — has an ID, status, messages, and artifacts |
+| **Message / Part** | A conversational turn containing typed parts: `TextPart`, `FilePart`, or `DataPart` |
+| **AgentExecutor** | The class you implement to define your agent's request-processing logic |
+| **EventQueue** | The channel through which an executor sends response events back to the caller |
+
+## Install dependencies
+
+<CodeGroup>
+
+```bash pip
+pip install a2a-sdk httpx uvicorn
+```
+
+```bash uv
+uv add a2a-sdk httpx uvicorn
+```
+
+</CodeGroup>
+
+## Import required libraries
+
+```python
+import json
+import uuid
+import asyncio
+import logging
+import httpx
+
+from a2a.client import A2ACardResolver, A2AClient
+from a2a.server.agent_execution import AgentExecutor, RequestContext
+from a2a.server.apps import A2AStarletteApplication
+from a2a.server.events import EventQueue
+from a2a.server.request_handlers import DefaultRequestHandler
+from a2a.server.tasks import InMemoryTaskStore
+from a2a.types import (
+    AgentCapabilities,
+    AgentCard,
+    AgentSkill,
+    MessageSendParams,
+    SendMessageRequest,
+)
+from a2a.utils import new_agent_text_message
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("A2A_Tutorial")
+
+NEWS_AGENT_BASE_URL = "http://localhost:9001"
+EVENTS_AGENT_BASE_URL = "http://localhost:9002"
+```
+
+## Implement agent executors
+
+Every A2A agent implements two methods on `AgentExecutor`: `execute` handles incoming requests by pushing events onto the `EventQueue`, and `cancel` handles cancellation requests.
+
+### NewsInfoAgent
+
+```python
+from typing import Optional
+
+class NewsInfoAgent:
+    """A simple agent that provides a static news headline."""
+    async def get_latest_news(self, query: Optional[str] = None) -> str:
+        logger.info(f"NewsInfoAgent received query: {query}")
+        return "Breaking News: AI discovers a new way to make coffee!"
+
+
+class NewsInfoAgentExecutor(AgentExecutor):
+    """Handles A2A requests for the NewsInfoAgent."""
+
+    def __init__(self):
+        super().__init__()
+        self.agent = NewsInfoAgent()
+
+    async def execute(
+        self,
+        context: RequestContext,
+        event_queue: EventQueue,
+    ) -> None:
+        logger.info(f"Executing task: {context.task_id}")
+
+        query_text = None
+        if context.request_message and context.request_message.message:
+            for part in context.request_message.message.parts:
+                if part.kind == 'text' and hasattr(part, 'text'):
+                    query_text = part.text
+                    break
+
+        try:
+            news_result = await self.agent.get_latest_news(query_text)
+            event_queue.enqueue_event(new_agent_text_message(news_result))
+        except Exception as e:
+            event_queue.enqueue_event(
+                new_agent_text_message(f"Error: {str(e)}")
+            )
+        finally:
+            event_queue.enqueue_event(None)  # Signal completion
+
+    async def cancel(
+        self, context: RequestContext, event_queue: EventQueue
+    ) -> None:
+        event_queue.enqueue_event(
+            new_agent_text_message("Cancel not supported.")
+        )
+        event_queue.enqueue_event(None)
+```
+
+### EventsInfoAgent
+
+```python
+class EventsInfoAgent:
+    """A simple agent that provides a static event update."""
+    async def get_current_events(self, query: Optional[str] = None) -> str:
+        logger.info(f"EventsInfoAgent received query: {query}")
+        return "Current Event: The annual 'Innovate AI' conference is happening this week!"
+
+
+class EventsInfoAgentExecutor(AgentExecutor):
+    """Handles A2A requests for the EventsInfoAgent."""
+
+    def __init__(self):
+        super().__init__()
+        self.agent = EventsInfoAgent()
+
+    async def execute(
+        self,
+        context: RequestContext,
+        event_queue: EventQueue,
+    ) -> None:
+        query_text = None
+        if context.request_message and context.request_message.message:
+            for part in context.request_message.message.parts:
+                if part.kind == 'text' and hasattr(part, 'text'):
+                    query_text = part.text
+                    break
+
+        try:
+            event_result = await self.agent.get_current_events(query_text)
+            event_queue.enqueue_event(new_agent_text_message(event_result))
+        except Exception as e:
+            event_queue.enqueue_event(
+                new_agent_text_message(f"Error: {str(e)}")
+            )
+        finally:
+            event_queue.enqueue_event(None)
+
+    async def cancel(
+        self, context: RequestContext, event_queue: EventQueue
+    ) -> None:
+        event_queue.enqueue_event(
+            new_agent_text_message("Cancel not supported.")
+        )
+        event_queue.enqueue_event(None)
+```
+
+## Define agent cards and build servers
+
+An `AgentCard` is the public description of your agent. Other agents and clients discover it at `/.well-known/agent.json`.
+
+```python
+# --- News Agent ---
+news_skill = AgentSkill(
+    id='get_latest_news',
+    name='Get Latest News',
+    description='Provides the latest news headline.',
+    tags=['news', 'information', 'tldr'],
+    examples=['what is the news?', 'latest headline', 'give me news']
+)
+
+news_agent_card = AgentCard(
+    name='News Information Agent',
+    description='Provides news headlines for the TLDR of the day.',
+    url=NEWS_AGENT_BASE_URL,
+    version='1.0.0',
+    defaultInputModes=['text'],
+    defaultOutputModes=['text'],
+    capabilities=AgentCapabilities(streaming=True),
+    skills=[news_skill],
+    supportsAuthenticatedExtendedCard=False
+)
+
+news_agent_server_app = A2AStarletteApplication(
+    agent_card=news_agent_card,
+    http_handler=DefaultRequestHandler(
+        agent_executor=NewsInfoAgentExecutor(),
+        task_store=InMemoryTaskStore(),
+    ),
+).build()
+
+# --- Events Agent ---
+events_skill = AgentSkill(
+    id='get_current_events',
+    name='Get Current Events',
+    description='Provides information about current events.',
+    tags=['events', 'information', 'tldr', 'conference'],
+    examples=['what are the current events?', 'any ongoing events?', 'tell me about events']
+)
+
+events_agent_card = AgentCard(
+    name='Current Events Information Agent',
+    description='Provides updates on current events for the TLDR of the day.',
+    url=EVENTS_AGENT_BASE_URL,
+    version='1.0.0',
+    defaultInputModes=['text'],
+    defaultOutputModes=['text'],
+    capabilities=AgentCapabilities(streaming=True),
+    skills=[events_skill],
+    supportsAuthenticatedExtendedCard=False
+)
+
+events_agent_server_app = A2AStarletteApplication(
+    agent_card=events_agent_card,
+    http_handler=DefaultRequestHandler(
+        agent_executor=EventsInfoAgentExecutor(),
+        task_store=InMemoryTaskStore(),
+    ),
+).build()
+```
+
+<Note>
+Run each agent server in a separate Python script using `uvicorn`. Do not run `uvicorn.run()` inside a notebook cell — it blocks the kernel.
+
+```python
+# run_news_agent.py
+import uvicorn
+# (paste NewsInfoAgentExecutor + server setup here)
+if __name__ == '__main__':
+    uvicorn.run(news_agent_server_app, host='0.0.0.0', port=9001)
+```
+</Note>
+
+## Discover and communicate with agents
+
+### Discover agent cards
+
+`A2ACardResolver` fetches the agent card from the well-known URI, giving you the agent's capabilities before you send any messages.
+
+```python
+async def resolve_agent_cards():
+    async with httpx.AsyncClient() as http_client:
+        resolver = A2ACardResolver(http_client=http_client)
+
+        try:
+            news_card = await resolver.get_public_card(NEWS_AGENT_BASE_URL)
+            print("News Agent Card:")
+            print(news_card.model_dump_json(indent=2))
+        except Exception as e:
+            print(f"Could not resolve News Agent card: {e}")
+
+        try:
+            events_card = await resolver.get_public_card(EVENTS_AGENT_BASE_URL)
+            print("Events Agent Card:")
+            print(events_card.model_dump_json(indent=2))
+        except Exception as e:
+            print(f"Could not resolve Events Agent card: {e}")
+
+await resolve_agent_cards()
+```
+
+### Send messages and stream responses
+
+`A2AClient` handles the HTTP transport and task lifecycle. Iterate over the stream to receive one or more response messages.
+
+```python
+from uuid import uuid4
+
+async def send_to_news_agent():
+    async with httpx.AsyncClient() as http_client:
+        a2a_client = A2AClient(http_client=http_client)
+        task_id = f"client-task-{uuid4()}"
+
+        print(f"Sending message to News Agent, task ID: {task_id}")
+
+        try:
+            async for response_part in a2a_client.send(
+                task_id=task_id,
+                agent_url=NEWS_AGENT_BASE_URL,
+                message_parts=[new_text_message_content_part("What's the latest news headline?")]
+            ):
+                if response_part:
+                    print("Response:")
+                    print(response_part.model_dump_json(indent=2))
+                else:
+                    print("Stream finished.")
+        except Exception as e:
+            print(f"Error: {e}")
+
+await send_to_news_agent()
+```
+
+## Related pattern: Streamlit UI for agents
+
+Once you have agents built, you may want a simple web UI for interactive testing without writing a full frontend. The [agent-with-streamlit-ui tutorial](https://github.com/NirDiamant/agents-towards-production/tree/main/tutorials/agent-with-streamlit-ui) shows exactly this pattern.
+
+The core of the Streamlit chatbot is a `generate_response` function that calls the OpenAI chat API and a `st.chat_input` widget that drives the conversation loop:
+
+```python
+import streamlit as st
+import openai
+import os
+
+client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+def generate_response(user_prompt, file_content=None):
+    messages = []
+    if file_content:
+        messages.append({
+            "role": "system",
+            "content": f"The user has uploaded a file:\n\n{file_content}"
+        })
+    messages.append({"role": "user", "content": user_prompt})
+
+    response = client.chat.completions.create(
+        model="gpt-4o",
+        messages=messages
+    )
+    return response.choices[0].message.content
+
+# Conversation loop
+if user_msg := st.chat_input("Type your message here..."):
+    st.session_state.messages.append({"role": "user", "content": user_msg})
+    with st.chat_message("user"):
+        st.markdown(user_msg)
+    with st.chat_message("assistant"):
+        with st.spinner("Thinking..."):
+            assistant_msg = generate_response(user_msg)
+            st.markdown(assistant_msg)
+    st.session_state.messages.append({"role": "assistant", "content": assistant_msg})
+```
+
+<Tip>
+Use the Streamlit UI pattern to manually test your A2A agents before integrating them into automated workflows. It gives you a fast feedback loop without building a dedicated test harness.
+</Tip>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Persistent task store" icon="database">
+    Replace `InMemoryTaskStore` with a Redis or database-backed store for production deployments where tasks must survive restarts.
+  </Card>
+  <Card title="Authenticated agent cards" icon="shield-check">
+    Implement `supportsAuthenticatedExtendedCard=True` and secure the extended card endpoint to share private capabilities only with trusted callers.
+  </Card>
+  <Card title="Orchestrating agent" icon="sitemap">
+    Build a `UserFacingAgent` that calls both `NewsInfoAgent` and `EventsInfoAgent` via A2A, then compiles their results into a final response.
+  </Card>
+  <Card title="A2A specification" icon="file-text">
+    Read the full [A2A Protocol Specification v0.1.0](https://google.github.io/A2A/specification/) for complete details on task states, streaming, and authentication models.
+  </Card>
+</CardGroup>

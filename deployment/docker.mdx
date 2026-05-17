@@ -1,0 +1,246 @@
+---
+title: "Containerizing agents with Docker for production"
+description: "Package AI agents into portable Docker containers, inject secrets at runtime, and ship consistent environments from your laptop to any cloud server."
+---
+
+Docker solves the most persistent problem in AI agent deployment: the gap between "works on my machine" and "works in production." By packaging your agent, its Python version, and every dependency into a single image, you guarantee identical behavior across your laptop, a CI runner, and a cloud server. This page walks you through the full workflow — from writing your first `Dockerfile` to running a dynamic, environment-variable-driven agent container.
+
+<Columns cols={3}>
+  <Card title="Reproducibility" icon="copy">
+    One image runs identically on any host, eliminating version-conflict surprises.
+  </Card>
+  <Card title="Portability" icon="box">
+    Ship the same container to AWS, GCP, Kubernetes, or a colleague's machine.
+  </Card>
+  <Card title="Separation of concerns" icon="layers">
+    Keep credentials out of code by injecting them as environment variables at runtime.
+  </Card>
+</Columns>
+
+## Prerequisites
+
+- [Docker Desktop](https://www.docker.com/products/docker-desktop) installed and running
+- A Docker Hub account (for pushing and pulling images)
+- Verify Docker is running:
+
+```bash
+docker --version
+# Docker version 28.0.4, build b8034c0
+```
+
+## Core Dockerfile instructions
+
+A `Dockerfile` is the image's recipe. Each instruction either creates a new layer or adds metadata:
+
+| Instruction | Purpose |
+|-------------|---------|
+| `FROM` | Base image (OS + runtime) |
+| `RUN` | Execute shell commands during build |
+| `COPY` | Copy files from host into image |
+| `ENV` | Set default environment variables |
+| `ARG` | Build-time parameters |
+| `WORKDIR` | Set working directory inside image |
+| `EXPOSE` | Document the port your service listens on |
+| `CMD` | Default command when the container starts |
+
+<Note>
+`FROM`, `RUN`, and `COPY` create cacheable layers. `LABEL`, `ENV`, `ARG`, and `CMD` add metadata only.
+</Note>
+
+## Building and running your first image
+
+<Steps>
+  <Step title="Write a minimal Dockerfile">
+    Start from the official Python 3.10 base image and install a system dependency:
+
+    ```dockerfile examples/ex1/Dockerfile
+    FROM python:3.10
+
+    LABEL example=1
+
+    ENV PYTHON_VER=3.10
+
+    RUN apt-get update && apt-get install -y --no-install-recommends curl
+    ```
+  </Step>
+
+  <Step title="Build the image">
+    Run this from the repository root. The `-f` flag points to the Dockerfile; `-t` sets the name and tag:
+
+    ```bash
+    docker build . -f ./examples/ex1/Dockerfile -t rkrispin/vscode-python:ex1
+    ```
+
+    Validate the build succeeded:
+
+    ```bash
+    docker images
+    # REPOSITORY               TAG   IMAGE ID       CREATED        SIZE
+    # rkrispin/vscode-python   ex1   a8e4c6d06c97   43 hours ago   1.02GB
+    ```
+  </Step>
+
+  <Step title="Run the container interactively">
+    ```bash
+    docker run --interactive --tty python:3.10
+    ```
+
+    You land inside a Python REPL running inside the container.
+  </Step>
+</Steps>
+
+## Layer caching
+
+Docker caches every layer. When you rebuild, only layers below the first changed instruction are rebuilt. Order your Dockerfile from least-changed (base image, system packages) to most-changed (application code) to maximize cache reuse.
+
+<CodeGroup>
+
+```dockerfile examples/ex2/Dockerfile
+FROM python:3.10
+
+LABEL example=2
+
+ENV PYTHON_VER=3.10
+
+RUN apt-get update && apt-get install -y --no-install-recommends curl
+
+RUN apt-get update && apt-get install -y --no-install-recommends vim
+```
+
+```bash rebuild with plain output
+docker build . -f ./examples/ex2/Dockerfile -t rkrispin/vscode-python:ex2 --progress=plain
+# => CACHED [2/3] RUN apt-get update && apt-get install -y --no-install-recommends curl
+# => [3/3] RUN apt-get update && apt-get install -y --no-install-recommends vim
+```
+
+</CodeGroup>
+
+<Tip>
+Put `COPY requirements.txt` and `RUN pip install` before `COPY . .` so dependency installation is cached across code-only changes.
+</Tip>
+
+## Volume mounts
+
+Containers are ephemeral by default — any file written inside them disappears when the container stops. Mount a local directory with `-v` to persist data or inject code at runtime:
+
+```bash
+docker run -v ./examples/ex3:/ex3 --interactive --tty rkrispin/vscode-python:ex3
+```
+
+Inside the container:
+
+```bash
+root@8c94db531eb4:/# cd ex3
+root@8c94db531eb4:/ex3# ls
+Dockerfile  hello-world.py
+root@8c94db531eb4:/ex3# python hello-world.py
+Hello World!
+```
+
+This pattern is useful for mounting local model weights into a container without baking large files into the image.
+
+## Dockerizing an AI agent
+
+The following example containers a minimal OpenAI agent. The agent script contains no credentials — the API key arrives at runtime through `--env`.
+
+<Tabs>
+  <Tab title="Agent script">
+    ```python examples/ex4/simple_agent.py
+    from openai import OpenAI
+
+    client = OpenAI()
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "user", "content": "What is the capital of France?"}],
+    )
+
+    print(response.choices[0].message.content)
+    ```
+  </Tab>
+  <Tab title="Dockerfile">
+    ```dockerfile examples/ex4/Dockerfile
+    FROM python:3.10-slim
+
+    RUN pip install --no-cache-dir openai
+
+    COPY ./examples/ex4/simple_agent.py /app/simple_agent.py
+
+    CMD ["python", "/app/simple_agent.py"]
+    ```
+  </Tab>
+</Tabs>
+
+Build and run:
+
+```bash
+docker build . -f ./examples/ex4/Dockerfile -t rkrispin/simple_agent:ex4
+
+docker run --env OPENAI_API_KEY=$OPENAI_API_KEY rkrispin/simple_agent:ex4
+# The capital of France is Paris.
+```
+
+<Warning>
+Never bake secrets into an image with `ENV OPENAI_API_KEY=sk-...`. Anyone who pulls the image gains access to the key. Always pass secrets at runtime with `--env` or a secrets manager.
+</Warning>
+
+## Dynamic agents via environment variables
+
+Make the agent reusable by reading the question from an environment variable:
+
+<CodeGroup>
+
+```python examples/ex5/dynamic_agent.py
+import os
+from openai import OpenAI
+
+client = OpenAI()
+
+question = os.getenv("QUESTION", "What is the capital of France?")
+
+response = client.chat.completions.create(
+    model="gpt-4o-mini",
+    messages=[{"role": "user", "content": question}],
+)
+
+print(f"Question: {question}")
+print(f"Answer: {response.choices[0].message.content}")
+```
+
+```dockerfile examples/ex5/Dockerfile
+FROM python:3.10-slim
+
+RUN pip install --no-cache-dir openai
+
+COPY ./examples/ex5/dynamic_agent.py /app/dynamic_agent.py
+
+ENV QUESTION="What is the capital of France?"
+
+CMD ["python", "/app/dynamic_agent.py"]
+```
+
+</CodeGroup>
+
+Run with a custom question:
+
+```bash
+docker build . -f ./examples/ex5/Dockerfile -t rkrispin/dynamic_agent:ex5
+
+docker run \
+  --env OPENAI_API_KEY=$OPENAI_API_KEY \
+  --env QUESTION="What is the capital of United Kingdom" \
+  rkrispin/dynamic_agent:ex5
+# Question: What is the capital of United Kingdom
+# Answer: The capital of the United Kingdom is London.
+```
+
+## Next steps
+
+<Columns cols={2}>
+  <Card title="Deploy on RunPod GPU" icon="microchip" href="/deployment/gpu-runpod">
+    Push your Docker image to RunPod's serverless GPU infrastructure for scalable inference.
+  </Card>
+  <Card title="Run LLMs locally with Ollama" icon="server" href="/deployment/on-prem-ollama">
+    Mount open-weight models into a container for fully offline, on-premises deployments.
+  </Card>
+</Columns>

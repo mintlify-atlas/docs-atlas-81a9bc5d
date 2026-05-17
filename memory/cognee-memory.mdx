@@ -1,0 +1,288 @@
+---
+title: "Knowledge-graph AI memory with Cognee"
+description: "Build a unified knowledge graph with Cognee. Ingest multi-source data, run cognify() to extract entity relationships, and query results with natural language."
+---
+
+Traditional documentation and search tools treat information sources as isolated silos. Cognee takes a different approach: it ingests data from multiple sources, uses AI to extract entities and relationships, and constructs a traversable **knowledge graph** that understands how ideas connect across time and context. Instead of keyword matching against individual documents, you query a unified memory layer that reasons over the connections between them.
+
+This tutorial builds an intelligent Python-development knowledge system that connects Guido van Rossum's CPython and mypy contributions with PEP guidelines, the Zen of Python, and your own coding history—creating an AI assistant that gives contextually relevant, explainable answers.
+
+<CardGroup cols={2}>
+  <Card title="add()" icon="plus">
+    Ingests data in JSON, Markdown, HTML, and other formats into named node sets for organised graph construction.
+  </Card>
+  <Card title="cognify()" icon="brain">
+    Runs AI extraction to identify entities, map relationships, and structure data into a traversable knowledge graph. Enable `temporal_cognify=True` for time-aware analysis.
+  </Card>
+  <Card title="search()" icon="magnifying-glass">
+    Queries the graph with natural language or `GRAPH_COMPLETION` search type. Supports filtering by node set and saving interactions for feedback.
+  </Card>
+  <Card title="memify()" icon="bolt">
+    Applies advanced pattern-recognition algorithms to infer implicit rules and connections across the graph—creating a dynamic memory layer.
+  </Card>
+</CardGroup>
+
+## Prerequisites
+
+- Python 3.10+
+- OpenAI API key (set as `OPENAI_API_KEY` in your `.env` file)
+- Cognee 0.3.3
+
+## Install Cognee
+
+```bash
+pip install cognee==0.3.3
+```
+
+Configure your model in `.env`:
+
+```bash
+LLM_MODEL="gpt-4o-mini"
+```
+
+<Note>
+GPT-4o-mini provides the right balance between extraction quality, processing speed, and cost for educational workloads. Swap to a larger model for production systems with complex relationship graphs.
+</Note>
+
+## Set up the environment
+
+Cognee uses async/await internally. Apply `nest_asyncio` if you're running inside a Jupyter notebook.
+
+```python
+import nest_asyncio
+nest_asyncio.apply()
+
+import cognee
+import os
+from pathlib import Path
+
+print(f"Cognee location: {cognee.__file__}")
+```
+
+Add the project root to `sys.path` so all modules resolve correctly:
+
+```python
+import sys
+from pathlib import Path
+
+notebook_dir = Path.cwd()
+project_root = notebook_dir.parent if notebook_dir.name == "notebooks" else Path.cwd()
+project_root_str = str(project_root.absolute())
+
+if project_root_str not in sys.path:
+    sys.path.insert(0, project_root_str)
+
+print(f"Project root: {project_root_str}")
+```
+
+## Initialise a clean graph
+
+Remove any leftover state from previous runs before building the graph:
+
+```python
+await cognee.prune.prune_data()
+await cognee.prune.prune_system(metadata=True)
+```
+
+## Data sources
+
+This tutorial uses five data sources, each representing a different perspective on Python development:
+
+| File | Node set | Purpose |
+|---|---|---|
+| `data/guido_contributions.json` | `guido_data` | Real PRs and commits from CPython and mypy |
+| `data/copilot_conversations.json` | `developer_data` | Personal AI-assisted coding conversations |
+| `data/my_developer_rules.md` | `developer_data` | Project-specific coding conventions |
+| `data/zen_principles.md` | `principles_data` | The Zen of Python |
+| `data/pep_style_guide.md` | `principles_data` | PEP 8 and typing style guidelines |
+
+## Build the knowledge graph
+
+### Step 1 — Ingest Guido's contributions
+
+Start with the authoritative source: Guido van Rossum's actual commits and pull requests. Enabling `temporal_cognify=True` creates time-based edges so you can later query how Python evolved chronologically.
+
+```python
+import cognee
+
+result = await cognee.add(
+    os.path.abspath("data/guido_contributions.json"),
+    node_set=["guido_data"],
+)
+await cognee.cognify(temporal_cognify=True)
+```
+
+Verify the graph was built successfully with a quick search:
+
+```python
+results = await cognee.search("Show me commits")
+print(results[0])
+# The commits are related to modifications in mypy files where changes were
+# made to handle type guards in callable types and argument acceptance in
+# functions. Notable changes were introduced in commit #9865.
+```
+
+<Info>
+After `cognify()` completes you'll see log output showing the number of nodes and edges created, e.g. `Graph projection completed: 126 nodes, 241 edges in 0.02s`. This confirms the graph structure is ready for queries.
+</Info>
+
+### Step 2 — Visualise the graph
+
+Generate an interactive HTML visualisation to inspect clusters and relationships before expanding the dataset:
+
+```python
+from cognee import visualize_graph
+
+await visualize_graph("./guido_contributions.html")
+```
+
+Open the file in your browser:
+
+```python
+import webbrowser
+from pathlib import Path
+
+html_path = Path("guido_contributions.html").resolve()
+webbrowser.open(html_path.as_uri())
+```
+
+The visualisation reveals clusters around CPython core development (~2020), mypy-specific fixture work, PEP discussions linking to collaborators like Thomas Grainger and Adam Turner, and temporal edges showing how ideas evolved into features.
+
+### Step 3 — Expand the knowledge graph
+
+Add the remaining data sources and process them into the same graph. The `node_set` parameter organises each source into a named partition that you can later filter queries against.
+
+```python
+import os
+
+await cognee.add(os.path.abspath("data/copilot_conversations.json"), node_set=["developer_data"])
+await cognee.add(os.path.abspath("data/my_developer_rules.md"),      node_set=["developer_data"])
+await cognee.add(os.path.abspath("data/zen_principles.md"),          node_set=["principles_data"])
+await cognee.add(os.path.abspath("data/pep_style_guide.md"),         node_set=["principles_data"])
+
+await cognee.cognify(temporal_cognify=True)
+```
+
+After this step the graph grows from ~126 nodes to ~397 nodes and ~775 edges as cross-domain relationships are discovered.
+
+## Query the graph
+
+### Cross-domain search
+
+Ask questions that span multiple data sources. Cognee traverses the graph to find connections you wouldn't discover through keyword search:
+
+```python
+results = await cognee.search(
+    "What validation issues did I encounter in January 2024, "
+    "and how would they be addressed in Guido's contributions?",
+    query_type=cognee.SearchType.GRAPH_COMPLETION,
+)
+print(results)
+# ['In January 2024, the validation issues encountered can be related to runtime
+#  validation, user input validation, and style checking. Guido's contributions
+#  would address these issues by emphasizing the importance of Pydantic for
+#  runtime validation, advocating for clear and explicit code practices as
+#  outlined in "The Zen of Python"...']
+```
+
+### Design-pattern analysis
+
+```python
+results = await cognee.search(
+    query_text="How does my AsyncWebScraper implementation align with Python's design principles?",
+    query_type=cognee.SearchType.GRAPH_COMPLETION,
+)
+print("Python Pattern Analysis:", results)
+# ["Your AsyncWebScraper implementation aligns with Python's design principles
+#  in several ways:
+#  1. Explicit is better than implicit: Ensure clear behavior, imports, and typing.
+#  2. Readability counts: Use docstrings and clean formatting.
+#  3. Simple is better than complex: Strive for straightforward solutions.
+#  4. Errors should never pass silently: Handle exceptions explicitly.
+#  5. There should be one obvious way to do it: Follow standard Python idioms."]
+```
+
+### Filtered search by node set
+
+Restrict a query to a specific partition of the graph using `node_type` and `node_name`:
+
+```python
+from cognee.modules.engine.models.node_set import NodeSet
+
+results = await cognee.search(
+    query_text="How should variables be named?",
+    query_type=cognee.SearchType.GRAPH_COMPLETION,
+    node_type=NodeSet,
+    node_name=["principles_data"],   # Only search PEP and Zen sources
+)
+```
+
+<Tip>
+Node set filtering is useful when you want authoritative guidance from a specific source. For style questions, restrict to `principles_data`; for implementation examples, restrict to `guido_data` or `developer_data`.
+</Tip>
+
+### Temporal queries
+
+Because you enabled `temporal_cognify=True`, you can query how Python development evolved over time:
+
+```python
+result = await cognee.search(
+    query_text="What can we learn from Guido's contributions in 2025?",
+    query_type=cognee.SearchType.TEMPORAL,
+)
+print(result)
+# ["In 2025, we can learn from Guido's contributions that addressing missing
+#  type annotations is crucial for improving test coverage in the mypyc
+#  repository. His actions emphasize the importance of type safety and
+#  thorough testing in software development."]
+```
+
+## Build the intelligent memory layer
+
+`memify()` goes beyond basic graph construction. It applies advanced algorithms to infer implicit patterns—such as recurring design decisions in Guido's commits that align with specific Zen principles—creating a dynamic memory layer that enhances future searches.
+
+```python
+await cognee.memify()
+```
+
+After `memify()` the graph expands further (~430 nodes, ~839 edges) as inferred relationships are added alongside the explicit ones extracted during `cognify()`.
+
+## Continuous learning through feedback
+
+Cognee supports a feedback loop that improves search quality over time. First, run a search with `save_interaction=True`:
+
+```python
+answer = await cognee.search(
+    query_type=cognee.SearchType.GRAPH_COMPLETION,
+    query_text="What is the most zen thing about Python?",
+    save_interaction=True,  # Required for subsequent feedback
+)
+```
+
+Then submit feedback to influence future results:
+
+```python
+feedback = await cognee.search(
+    query_type=cognee.SearchType.FEEDBACK,
+    query_text="Last result was useful, I like code that complies with best practices.",
+    last_k=1,
+)
+```
+
+<Info>
+Feedback becomes part of the graph itself, shifting the relevance scores of related nodes so future searches surface more of what you found valuable.
+</Info>
+
+## Search type reference
+
+| `SearchType` | Description |
+|---|---|
+| `GRAPH_COMPLETION` | Traverses the full graph and synthesises a natural-language answer. |
+| `TEMPORAL` | Focuses on time-based edges to answer "how did X evolve?" questions. |
+| `FEEDBACK` | Submits relevance feedback against the last saved interaction. |
+
+## Next steps
+
+- Add a project README, architecture decision records, or code-review threads as additional node sets to grow the knowledge base.
+- Schedule periodic `cognify()` runs as new data arrives to keep the graph current.
+- Combine Cognee's graph layer with a retrieval-augmented generation pipeline for richer, citation-backed responses.

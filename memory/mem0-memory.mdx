@@ -1,0 +1,398 @@
+---
+title: "Persistent hybrid memory for AI agents with Mem0"
+description: "Give agents persistent, self-improving memory with Mem0. Covers memory.add(), memory.search(), and memory.get_all() using a real research-assistant example."
+---
+
+Most AI agents suffer from session amnesia: every conversation starts from a blank slate. Mem0 solves this with a **self-improving memory layer** that automatically extracts key facts from conversations, stores them in vector and graph databases, resolves contradictions, and retrieves the right context in future sessions. Instead of reinventing deduplication, conflict resolution, and semantic search, you get a battle-tested system that learns from each interaction.
+
+<CardGroup cols={2}>
+  <Card title="Vector memory" icon="magnifying-glass">
+    Stores extracted facts as embeddings in Qdrant (or another supported vector store) for semantic similarity retrieval.
+  </Card>
+  <Card title="Graph memory" icon="diagram-project">
+    Maps entity relationships in Neo4j (or another graph database) so the agent can answer questions like "how did Paper A influence Paper B?"
+  </Card>
+  <Card title="Automatic extraction" icon="sparkles">
+    Mem0 uses an LLM to pull key facts out of raw conversation text, so you don't need to define extraction rules manually.
+  </Card>
+  <Card title="Conflict resolution" icon="arrows-rotate">
+    When a user contradicts an earlier statement, Mem0 updates the stored fact rather than creating a duplicate.
+  </Card>
+</CardGroup>
+
+## What you'll build
+
+A **Personal AI Research Assistant** that:
+
+- Maintains intelligent memory that automatically extracts and stores research interests
+- Maps knowledge relationships between papers, authors, and concepts using graph storage
+- Adapts to user preferences through self-improving memory
+- Provides contextual assistance using hybrid memory retrieval
+- Learns and evolves with each research conversation
+
+## Prerequisites
+
+<CardGroup cols={3}>
+  <Card title="OpenAI API key" icon="key">
+    Used for LLM reasoning (GPT-4o-mini) and text embeddings.
+  </Card>
+  <Card title="Qdrant Cloud" icon="database">
+    Vector store for semantic memory search. A free tier is available at cloud.qdrant.io.
+  </Card>
+  <Card title="Neo4j AuraDB" icon="diagram-project">
+    Graph database for Phase 2 relationship mapping. A free tier is available at neo4j.com/aura.
+  </Card>
+</CardGroup>
+
+## Install dependencies
+
+```bash
+pip install mem0ai openai python-dotenv neo4j
+```
+
+```python
+import os
+import getpass
+from mem0 import Memory
+from openai import OpenAI
+```
+
+## Configure API keys
+
+```python
+def setup_api_keys():
+    if "OPENAI_API_KEY" not in os.environ:
+        os.environ["OPENAI_API_KEY"] = getpass.getpass("Enter your OpenAI API key: ")
+
+    if "QDRANT_URL" not in os.environ:
+        os.environ["QDRANT_URL"] = input("Enter your Qdrant Cloud URL: ")
+    if "QDRANT_API_KEY" not in os.environ:
+        os.environ["QDRANT_API_KEY"] = getpass.getpass("Enter your Qdrant API key: ")
+
+    return True
+
+use_qdrant_cloud = setup_api_keys()
+```
+
+## Phase 1: vector memory
+
+### Configure the memory system
+
+```python
+config = {
+    "llm": {
+        "provider": "openai",
+        "config": {
+            "model": "gpt-4o-mini",
+            "temperature": 0.1,
+            "max_tokens": 2000,
+        }
+    },
+    "embedder": {
+        "provider": "openai",
+        "config": {
+            "model": "text-embedding-3-large",
+            "embedding_dims": 3072,
+        }
+    },
+    "vector_store": {
+        "provider": "qdrant",
+        "config": {
+            "url": os.environ["QDRANT_URL"],
+            "api_key": os.environ["QDRANT_API_KEY"],
+            "collection_name": "research_assistant_vectors",
+            "embedding_model_dims": 3072,  # Must match the embedder above
+        }
+    },
+    "version": "v1.1",
+}
+
+try:
+    memory = Memory.from_config(config)
+    print("Memory system initialised successfully!")
+except Exception as e:
+    print(f"Error initialising memory: {e}")
+```
+
+<Note>
+`embedding_model_dims` in the vector store config **must** match the actual output dimensions of the embedder you configure. `text-embedding-3-large` produces 3072-dimensional vectors.
+</Note>
+
+### Core Mem0 operations
+
+Mem0 exposes three primary operations you'll use in most agents:
+
+<CardGroup cols={3}>
+  <Card title="memory.add()" icon="plus">
+    Extracts key facts from text or a conversation and stores them, handling deduplication and conflict resolution automatically.
+  </Card>
+  <Card title="memory.search()" icon="magnifying-glass">
+    Finds semantically similar stored memories for a given query string, ranked by relevance.
+  </Card>
+  <Card title="memory.get_all()" icon="list">
+    Returns all memories for a specific `user_id`, useful for inspecting or exporting what the system has learned.
+  </Card>
+</CardGroup>
+
+### Build the research assistant
+
+```python
+class PersonalResearchAssistant:
+
+    def __init__(self, memory_instance):
+        self.client = OpenAI()
+        self.memory = memory_instance
+        print("Research Assistant initialised with Mem0 memory!")
+
+    def ask(self, question, user_id):
+        # Retrieve relevant memories before answering
+        previous_memories = self.search_memories(question, user_id=user_id)
+
+        system_message = (
+            "You are a personal AI Research Assistant. Help users with research "
+            "questions, remember their interests, and provide contextual recommendations."
+        )
+
+        if previous_memories:
+            memory_context = ", ".join(previous_memories)
+            prompt = f"{system_message}\n\nUser input: {question}\nPrevious memories: {memory_context}"
+        else:
+            prompt = f"{system_message}\n\nUser input: {question}"
+
+        try:
+            response = self.client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "system", "content": prompt}],
+                temperature=0.1,
+                max_tokens=2000,
+            )
+            answer = response.choices[0].message.content
+
+            # Store the question so context accumulates over time
+            self.memory.add(question, user_id=user_id, metadata={"category": "research"})
+            return answer
+
+        except Exception as e:
+            return f"Encountered an error: {e}"
+
+    def get_memories(self, user_id):
+        try:
+            memories = self.memory.get_all(user_id=user_id)
+            if isinstance(memories, dict) and "results" in memories:
+                return [m["memory"] for m in memories["results"]]
+            elif isinstance(memories, list):
+                return [m["memory"] for m in memories]
+            return []
+        except Exception as e:
+            print(f"Error retrieving memories: {e}")
+            return []
+
+    def search_memories(self, query, user_id):
+        try:
+            memories = self.memory.search(query, user_id=user_id)
+            if isinstance(memories, dict) and "results" in memories:
+                return [m["memory"] for m in memories["results"]]
+            elif isinstance(memories, list):
+                return [m["memory"] for m in memories]
+            return []
+        except Exception as e:
+            print(f"Error searching memories: {e}")
+            return []
+
+assistant = PersonalResearchAssistant(memory)
+```
+
+### Watch memory evolve across conversations
+
+Run these interactions in sequence to observe how the memory layer builds context over time.
+
+<Steps>
+  <Step title="First interaction — knowledge extraction">
+```python
+response1 = assistant.ask(
+    "I'm interested in transformer architectures for natural language processing. "
+    "Can you help me find recent papers on this topic?",
+    user_id="researcher",
+)
+print(f"Assistant: {response1}")
+```
+Mem0 extracts the research interest ("transformer architectures for NLP") and stores it.
+  </Step>
+
+  <Step title="Build context — preference capture">
+```python
+response2 = assistant.ask(
+    "I prefer papers that include practical implementation details and code examples. "
+    "Theoretical papers without code are less useful for my work.",
+    user_id="researcher",
+)
+print(f"Assistant: {response2}")
+```
+Mem0 stores the style preference and links it to the earlier topic.
+  </Step>
+
+  <Step title="Semantic search — beyond keywords">
+```python
+response3 = assistant.ask(
+    "What about BERT and GPT models? Are they related to my research interests?",
+    user_id="researcher",
+)
+print(f"Assistant: {response3}")
+```
+The assistant retrieves the transformer-interest memory via semantic similarity, even though "BERT" and "GPT" were not mentioned in the first message.
+  </Step>
+
+  <Step title="Conflict resolution — preference update">
+```python
+response4 = assistant.ask(
+    "Actually, I also need to understand the theoretical foundations of attention "
+    "mechanisms. Can you recommend some foundational theory papers?",
+    user_id="researcher",
+)
+print(f"Assistant: {response4}")
+```
+Mem0 updates the stored preference to reflect the nuanced position rather than creating a contradiction.
+  </Step>
+</Steps>
+
+### Inspect what was learned
+
+```python
+def analyze_extracted_memories():
+    all_memories = assistant.get_memories(user_id="researcher")
+
+    if all_memories:
+        print(f"Total memories extracted: {len(all_memories)}")
+        for i, memory in enumerate(all_memories, 1):
+            print(f"\n{i}. {memory}")
+
+        # Test semantic search capability
+        test_queries = [
+            "neural networks",        # Should connect to transformers
+            "code implementations",   # Should find practical preferences
+            "attention mechanisms",   # Should connect to transformer interest
+            "deep learning papers",   # Should find research interests
+        ]
+        for query in test_queries:
+            related = assistant.search_memories(query, user_id="researcher")
+            print(f"\nQuery: '{query}' — {len(related)} related memories found")
+            if related:
+                print(f"  Top match: {related[0][:100]}...")
+
+memories = analyze_extracted_memories()
+```
+
+## Phase 2: graph memory
+
+Graph memory adds explicit entity-relationship mapping on top of the vector layer. Use it when your application needs to answer structural questions like "who collaborated with whom?" or "how did Paper A influence Paper B?"
+
+### Configure graph storage
+
+```python
+def setup_graph_capabilities():
+    neo4j_uri = input("Neo4j URI (e.g. neo4j+s://xxx.databases.neo4j.io): ")
+    neo4j_username = input("Username (usually 'neo4j'): ")
+    neo4j_password = getpass.getpass("Password: ")
+
+    return True, {
+        "url": neo4j_uri,
+        "username": neo4j_username,
+        "password": neo4j_password,
+    }
+
+has_graph, graph_config = setup_graph_capabilities()
+```
+
+### Create the hybrid configuration
+
+```python
+enhanced_config = {
+    "llm": {
+        "provider": "openai",
+        "config": {
+            "model": "gpt-4o-mini",
+            "temperature": 0.1,
+            "max_tokens": 2000,
+        }
+    },
+    "embedder": {
+        "provider": "openai",
+        "config": {
+            "model": "text-embedding-3-large",
+            "embedding_dims": 3072,
+        }
+    },
+    "vector_store": {
+        "provider": "qdrant",
+        "config": {
+            "url": os.environ["QDRANT_URL"],
+            "api_key": os.environ["QDRANT_API_KEY"],
+            "collection_name": "research_assistant_hybrid",
+            "embedding_model_dims": 3072,
+        }
+    },
+    "graph_store": {
+        "provider": "neo4j",
+        "config": graph_config,
+    },
+    "version": "v1.1",
+}
+
+try:
+    enhanced_memory = Memory.from_config(enhanced_config)
+    enhanced_assistant = PersonalResearchAssistant(enhanced_memory)
+    print("Hybrid memory system initialised successfully!")
+except Exception as e:
+    print(f"Error initialising hybrid memory: {e}")
+    enhanced_assistant = assistant  # Fall back to vector-only
+```
+
+### Graph-enhanced research examples
+
+<Tabs>
+  <Tab title="Research lineage">
+```python
+graph_response1 = enhanced_assistant.ask(
+    "I'm studying the lineage of transformer papers. The original "
+    "'Attention Is All You Need' by Vaswani et al. led to BERT by Devlin et al., "
+    "and then to many other models. Can you help me map these research connections "
+    "and suggest related work?",
+    user_id="graph_user",
+)
+print(f"Hybrid Assistant: {graph_response1}")
+```
+The graph layer maps explicit `led_to` relationships between papers so future queries can traverse the research lineage.
+  </Tab>
+  <Tab title="Collaboration network">
+```python
+graph_response2 = enhanced_assistant.ask(
+    "What other researchers have worked on transformer architectures? "
+    "I want to understand the collaboration network and research groups in this field.",
+    user_id="graph_user",
+)
+print(f"Hybrid Assistant: {graph_response2}")
+```
+Neo4j stores `collaborated_with` edges between author nodes, enabling graph traversal queries that vector search cannot answer.
+  </Tab>
+</Tabs>
+
+## Deployment options
+
+<CardGroup cols={2}>
+  <Card title="Self-hosted" icon="server">
+    Full control over your stack. Bring your own Qdrant and Neo4j instances. Ideal for learning, prototyping, and custom compliance requirements.
+  </Card>
+  <Card title="Mem0 managed platform" icon="cloud">
+    Managed service with a free tier (10K memories). Zero infrastructure overhead, built-in analytics, and enterprise graph memory. Ships faster and scales without ops.
+  </Card>
+</CardGroup>
+
+<Tip>
+Mem0's internal benchmarks report 26% better accuracy, 91% faster responses, and 90% fewer tokens compared to naive context-stuffing approaches.
+</Tip>
+
+## Next steps
+
+- Combine `memory.add()` calls with structured extraction prompts to improve the quality of stored facts.
+- Use `memory.update()` and `memory.delete()` to maintain hygiene in long-running production deployments.
+- Explore the Mem0 platform dashboard to visualise the knowledge graph your agent is building.

@@ -1,0 +1,102 @@
+{
+  "projectType": "ai-ml",
+  "projectName": "Agents Towards Production",
+  "projectDescription": "End-to-end, code-first tutorials for building and deploying production-grade GenAI agents from prototype to enterprise scale.",
+  "theme": "palm",
+  "primaryColor": "#94cb04",
+  "lightColor": "#545454",
+  "darkColor": null,
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Guides",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "quickstart",
+              "architecture"
+            ]
+          },
+          {
+            "group": "Agent Frameworks",
+            "pages": [
+              "frameworks/langgraph",
+              "frameworks/fastapi",
+              "frameworks/mcp",
+              "frameworks/kotlin-koog"
+            ]
+          },
+          {
+            "group": "Memory & Knowledge",
+            "pages": [
+              "memory/redis-memory",
+              "memory/mem0-memory",
+              "memory/cognee-memory",
+              "memory/rag-contextual"
+            ]
+          },
+          {
+            "group": "Tool Integration & Data",
+            "pages": [
+              "tools/secure-tool-calling",
+              "tools/web-search-tavily",
+              "tools/web-data-brightdata"
+            ]
+          },
+          {
+            "group": "Deployment",
+            "pages": [
+              "deployment/docker",
+              "deployment/aws-agentcore",
+              "deployment/on-prem-ollama",
+              "deployment/gpu-runpod"
+            ]
+          },
+          {
+            "group": "Observability & Quality",
+            "pages": [
+              "observability/tracing-langsmith",
+              "observability/evaluation-intellagent",
+              "observability/security-llamafirewall",
+              "observability/security-apex",
+              "observability/fine-tuning",
+              "observability/multi-agent-a2a"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "28 production-grade tutorials covering every layer of the GenAI agent stack",
+    "Stateful workflow design with LangGraph directed graphs",
+    "Dual-memory architecture with Redis and Mem0 (vector + graph storage)",
+    "Real-time web data integration via Tavily and Bright Data",
+    "Secure tool calling with OAuth2 and human-in-the-loop controls",
+    "Containerized deployment with Docker and GPU scaling on RunPod",
+    "Comprehensive security guardrails with LlamaFirewall and Apex",
+    "Full observability with LangSmith tracing and automated evaluation",
+    "Multi-agent coordination via A2A protocol",
+    "Fine-tuning models for domain expertise and cost efficiency"
+  ],
+  "publicApiSurface": [
+    "LangGraph stateful agent workflows",
+    "FastAPI synchronous and streaming agent endpoints",
+    "Model Context Protocol (MCP) tool integration",
+    "Redis dual-memory (short-term + long-term semantic search)",
+    "Mem0 hybrid vector + graph memory",
+    "Tavily real-time web search",
+    "Bright Data enterprise web scraping",
+    "Arcade secure OAuth2 tool calling",
+    "LlamaFirewall input/output/tool guardrails",
+    "LangSmith tracing and debugging",
+    "IntellAgent automated evaluation",
+    "AWS Bedrock AgentCore managed deployment",
+    "RunPod GPU cloud deployment",
+    "Ollama on-premises LLM deployment",
+    "A2A multi-agent communication protocol",
+    "Streamlit chatbot UI"
+  ]
+}

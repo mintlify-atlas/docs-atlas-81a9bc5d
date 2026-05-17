@@ -1,0 +1,330 @@
+---
+title: "Tool and API integration via Model Context Protocol"
+description: "Use MCP to connect agents to external tools via a standardized protocol. Build an MCP server, discover its tools, and call them from a custom host agent."
+---
+
+Model Context Protocol (MCP) is an open protocol that standardizes how applications provide context and tools to large language models. Think of it as a USB-C port for AI: just as USB-C lets you plug any compatible device into any compatible host, MCP lets you connect any MCP server to any MCP-capable agent without writing custom integration code for each pair.
+
+<CardGroup cols={3}>
+  <Card title="Standardized integration" icon="plug">
+    One protocol connects any agent to any tool—no custom API glue per integration.
+  </Card>
+  <Card title="Dynamic discovery" icon="search">
+    Agents discover available tools at runtime by querying the server's tool list.
+  </Card>
+  <Card title="Bidirectional communication" icon="arrow-left-right">
+    JSON-RPC 2.0 over stdio or WebSocket supports real-time, stateful interactions.
+  </Card>
+</CardGroup>
+
+## Architecture overview
+
+MCP follows a client-server model with four components:
+
+| Component | Role |
+|---|---|
+| **Host** | The AI application (your agent, Claude Desktop, Cursor) that needs tools |
+| **Client** | A connector embedded in the host that manages the connection to a server |
+| **Server** | A lightweight process that exposes tools, prompts, or data sources |
+| **Data sources** | Local files, databases, or remote APIs that the server wraps |
+
+Communication uses JSON-RPC 2.0. Servers can run as child processes communicating over stdio (simple, local) or as networked services communicating over WebSocket (distributed).
+
+## Setting up the environment
+
+MCP servers can be written in Python using the `mcp` package, managed with the `uv` package manager:
+
+<Steps>
+  <Step title="Install uv">
+    ```bash
+    curl -LsSf https://astral.sh/uv/install.sh | sh
+    ```
+  </Step>
+  <Step title="Create and configure a project">
+    ```bash
+    mkdir mcp-crypto-server
+    cd mcp-crypto-server
+    uv init
+
+    uv venv
+    source .venv/bin/activate   # Windows: .venv\Scripts\activate
+
+    uv add "mcp[cli]" httpx
+    ```
+  </Step>
+  <Step title="Start the server">
+    Once you have a server script (`mcp_server.py`), run it with:
+
+    ```bash
+    uv run mcp_server.py
+    ```
+  </Step>
+</Steps>
+
+<Note>
+The tutorial uses a cryptocurrency price lookup service built on the CoinGecko API as the example MCP server. You can follow the same patterns to wrap any data source or API.
+</Note>
+
+## Building a custom MCP host and client
+
+The tutorial shows how to build your own MCP host instead of relying on Claude Desktop. This gives you complete control over how the agent discovers tools, decides when to use them, and processes their results.
+
+### Import and configure the MCP client
+
+```python
+import os
+import json
+from typing import List, Dict, Any
+
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+from anthropic import Anthropic
+
+os.environ["ANTHROPIC_API_KEY"] = "your_anthropic_api_key_here"
+
+client = Anthropic()
+
+# Absolute path to your running MCP server script
+mcp_server_path = "absolute/path/to/your/running/mcp/server"
+```
+
+The `stdio_client` interface launches the MCP server as a child process and communicates with it over standard input/output. This is the simplest transport for local development.
+
+### Discover available tools
+
+The host's first job is to ask the server what tools it provides. The `list_tools()` call returns the tool names, descriptions, and JSON schemas that the agent will pass to the LLM:
+
+```python
+async def discover_tools():
+    """Connect to the MCP server and discover available tools."""
+    server_params = StdioServerParameters(
+        command="python",
+        args=[mcp_server_path],
+    )
+
+    async with stdio_client(server_params) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+
+            tools = await session.list_tools()
+
+            tool_info = []
+            for tool_type, tool_list in tools:
+                if tool_type == "tools":
+                    for tool in tool_list:
+                        tool_info.append({
+                            "name": tool.name,
+                            "description": tool.description,
+                            "schema": tool.inputSchema
+                        })
+
+            return tool_info
+```
+
+### Execute a tool
+
+When the LLM decides to use a tool, the client connects to the server and calls `call_tool()` with the tool name and arguments:
+
+```python
+async def execute_tool(tool_name: str, arguments: Dict[str, Any]):
+    """Execute a specific tool provided by the MCP server."""
+    server_params = StdioServerParameters(
+        command="python",
+        args=[mcp_server_path],
+    )
+
+    async with stdio_client(server_params) as (read, write):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+
+            result = await session.call_tool(tool_name, arguments)
+            return result
+```
+
+<Info>
+Each call creates a new connection to the MCP server. This stateless approach simplifies the implementation and avoids shared state between tool calls. In production, you could maintain a persistent connection for better performance.
+</Info>
+
+### Connect the agent to the MCP tools
+
+The `query_claude` function ties everything together. It formats the tool information for Claude, sends the user's query, detects when Claude wants to call a tool, executes the tool via the MCP client, and returns the final interpreted response:
+
+```python
+async def query_claude(
+    prompt: str,
+    tool_info: List[Dict],
+    previous_messages=None
+):
+    """Send a query to Claude and process the response, executing tools as needed."""
+    if previous_messages is None:
+        previous_messages = []
+
+    # Format tool information for Claude's system prompt
+    tool_descriptions = "\n\n".join([
+        f"Tool: {tool['name']}\n"
+        f"Description: {tool['description']}\n"
+        f"Schema: {json.dumps(tool['schema'], indent=2)}"
+        for tool in tool_info
+    ])
+
+    system_prompt = f"""You are an AI assistant with access to specialized tools through MCP.
+
+Available tools:
+{tool_descriptions}
+
+When you need to use a tool, respond with a JSON object in the following format:
+{{
+    "tool": "tool_name",
+    "arguments": {{
+        "arg1": "value1"
+    }}
+}}
+
+Do not include any other text when using a tool, just the JSON object.
+For regular responses, simply respond normally.
+"""
+
+    messages = [msg for msg in previous_messages if msg["role"] != "system"]
+    messages.append({"role": "user", "content": prompt})
+
+    response = client.messages.create(
+        model="claude-3-5-sonnet-20240620",
+        max_tokens=4000,
+        system=system_prompt,
+        messages=messages
+    )
+
+    claude_response = response.content[0].text
+
+    # Detect and execute tool calls embedded in Claude's response
+    try:
+        import re
+        json_match = re.search(r'(\{[\s\S]*\})', claude_response)
+
+        if json_match:
+            tool_request = json.loads(json_match.group(1))
+
+            if "tool" in tool_request and "arguments" in tool_request:
+                tool_result = await execute_tool(
+                    tool_request["tool"],
+                    tool_request["arguments"]
+                )
+
+                if not isinstance(tool_result, str):
+                    tool_result = str(tool_result)
+
+                messages.append({"role": "assistant", "content": claude_response})
+                messages.append({"role": "user", "content": f"Tool result: {tool_result}"})
+
+                final_response = client.messages.create(
+                    model="claude-3-5-sonnet-20240620",
+                    max_tokens=4000,
+                    system=system_prompt,
+                    messages=messages
+                )
+
+                return final_response.content[0].text, messages
+
+    except (json.JSONDecodeError, KeyError, AttributeError):
+        pass
+
+    return claude_response, messages
+```
+
+### Run a query
+
+```python
+# First, discover the tools
+tools = await discover_tools()
+print(f"Discovered {len(tools)} tools:")
+for tool in tools:
+    print(f"  {tool['name']}: {tool['description']}")
+
+# Then query the agent
+response, messages = await query_claude(
+    "What is the current price of Bitcoin?",
+    tools
+)
+print("Response:", response)
+```
+
+## Connecting to Claude Desktop
+
+You can also register your MCP server with Claude Desktop so it becomes available in every conversation without writing any agent code.
+
+<Steps>
+  <Step title="Find your uv path">
+    ```bash
+    which uv
+    ```
+  </Step>
+  <Step title="Edit the Claude Desktop config">
+    Open or create the config file for your platform:
+
+    - **macOS:** `~/Library/Application Support/Claude/claude_desktop_config.json`
+    - **Windows:** `%APPDATA%\Claude\claude_desktop_config.json`
+    - **Linux:** `~/.config/Claude/claude_desktop_config.json`
+  </Step>
+  <Step title="Add your server">
+    ```json
+    {
+        "mcpServers": {
+            "crypto-price-tracker": {
+                "command": "/ABSOLUTE/PATH/TO/uv",
+                "args": [
+                    "--directory",
+                    "/ABSOLUTE/PATH/TO/mcp-crypto-server",
+                    "run",
+                    "mcp_server.py"
+                ]
+            }
+        }
+    }
+    ```
+  </Step>
+  <Step title="Restart Claude Desktop">
+    The hammer icon in the chat box confirms that Claude Desktop has loaded your tools successfully.
+  </Step>
+</Steps>
+
+## Running an interactive chat session
+
+The tutorial includes a multi-turn chat loop that maintains conversation context across queries:
+
+```python
+async def chat_session():
+    """Run an interactive chat session with the MCP agent."""
+    tools = await discover_tools()
+    print(f"Agent ready with {len(tools)} tools.")
+
+    messages = []
+
+    while True:
+        user_input = input("\nYou: ")
+        if user_input.lower() in ["exit", "quit"]:
+            break
+
+        response, messages = await query_claude(user_input, tools, messages)
+        print(f"Assistant: {response}")
+
+# Start the session
+await chat_session()
+```
+
+<Tip>
+Passing `messages` back into each `query_claude` call gives the agent memory of the full conversation. Try asking "What's the market data for Dogecoin?" followed by "How about Solana?" — the agent understands the follow-up because of the accumulated context.
+</Tip>
+
+## Key concepts summary
+
+<AccordionGroup>
+  <Accordion title="Why use MCP instead of direct API calls?">
+    Direct API calls require custom integration code for every tool–agent pair. MCP defines a single protocol that any compliant server and client can speak. Add a new tool by writing one MCP server; any MCP host—your custom agent, Claude Desktop, or any future tool—can use it immediately.
+  </Accordion>
+  <Accordion title="What is the discovery phase?">
+    When the agent starts, it calls `list_tools()` on the server. The server returns the name, description, and JSON input schema for each tool. The agent forwards these schemas to the LLM as part of the system prompt, so the model knows what tools exist and what arguments they expect.
+  </Accordion>
+  <Accordion title="How does the execution phase work?">
+    When the LLM decides to use a tool, it outputs a JSON object with the tool name and arguments. The host parses this response, calls `call_tool()` on the MCP client with the extracted parameters, receives the result, and sends it back to the LLM for interpretation. The final user-visible response is the LLM's natural language summary of the tool output.
+  </Accordion>
+</AccordionGroup>

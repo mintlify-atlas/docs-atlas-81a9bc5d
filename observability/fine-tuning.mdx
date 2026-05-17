@@ -1,0 +1,306 @@
+---
+title: "Fine-tuning LLMs for domain expertise and efficiency"
+description: "Prepare JSONL training data, launch a fine-tuning job via the OpenAI API, monitor loss curves, and integrate the resulting model into a LangGraph agent."
+---
+
+Prompt engineering has a ceiling. When you need consistent structured output, deep domain vocabulary, or faster inference at lower cost, supervised fine-tuning (SFT) is the right tool. Fine-tuning takes a pre-trained model and adapts it to your specific dataset — the result is a smaller, faster model that behaves predictably without lengthy system prompts.
+
+## Why fine-tune?
+
+<CardGroup cols={2}>
+  <Card title="Domain expertise" icon="book-open">
+    Internalizes domain-specific regulations, compliance requirements, and terminology. Reduces hallucinations in specialized contexts where the base model lacks coverage.
+  </Card>
+  <Card title="Consistent style and tone" icon="palette">
+    Learns your brand voice and maintains it across all interactions without needing it re-stated in every system prompt.
+  </Card>
+  <Card title="Structured outputs" icon="brackets-curly">
+    Reliably generates specific formats — JSON, SQL, Markdown — without prompt gymnastics.
+  </Card>
+  <Card title="Reduced cost" icon="circle-dollar-sign">
+    Eliminates the need for lengthy system prompts and allows smaller models to replace larger ones for specialized tasks, cutting token costs significantly.
+  </Card>
+</CardGroup>
+
+## Prepare training data
+
+OpenAI fine-tuning expects UTF-8 encoded JSONL files. Each line is a single training example containing a `messages` array with `system`, `user`, and `assistant` turns.
+
+### Data format
+
+```jsonl
+{
+  "messages": [
+    {"role": "system", "content": "You are a helpful domain expert assistant."},
+    {"role": "user", "content": "What is the policy on this matter?"},
+    {"role": "assistant", "content": "According to our policies..."}
+  ]
+}
+```
+
+### Generate diverse examples
+
+Using a banking assistant as an example — the same pattern applies to any domain:
+
+```python
+import json
+import random
+import pathlib
+import pandas as pd
+
+DATA_DIR = pathlib.Path("bank_finetune_data")
+DATA_DIR.mkdir(exist_ok=True)
+
+kb_docs = [
+    {
+        "title": "Account Types",
+        "content": {
+            "checking": "We offer three types of checking accounts: Basic (no minimum balance), Premium ($2,500 minimum, no fees), and Student (no fees with valid student ID).",
+            "savings": "Our savings accounts include Regular (0.5% APY), High-Yield (1.5% APY with $10,000 minimum), and Goal-Based savings with customizable targets.",
+            "business": "Business accounts feature unlimited transactions, merchant services integration, and dedicated support. Available in Standard and Premium tiers."
+        }
+    }
+]
+
+def generate_diverse_examples(kb_doc):
+    """Generate multiple training examples with diverse phrasings per subtopic."""
+    examples = []
+    content = kb_doc["content"]
+
+    for subtopic, details in content.items():
+        questions = [
+            f"Can you explain {subtopic}?",
+            f"What should I know about {subtopic}?",
+            f"Tell me about your {subtopic}",
+            f"How does {subtopic} work?",
+            f"I need information regarding {subtopic}",
+            f"What are the details of {subtopic}?"
+        ]
+
+        responses = [
+            f"Here's what you need to know about {subtopic}: {details}",
+            f"Regarding {subtopic}: {details} Let me know if you need any clarification.",
+            f"I'll explain {subtopic}. {details} Is there anything specific you'd like to know more about?",
+            f"{details} This information about {subtopic} is current as of today."
+        ]
+
+        system_messages = [
+            "You are a knowledgeable banking assistant focused on providing accurate, compliant information.",
+            "You are a helpful financial services expert committed to clear, precise communication.",
+            "You are a banking specialist dedicated to providing detailed, accurate responses."
+        ]
+
+        for system_msg in system_messages:
+            for question in questions:
+                for response in responses:
+                    examples.append({
+                        "messages": [
+                            {"role": "system", "content": system_msg},
+                            {"role": "user", "content": question},
+                            {"role": "assistant", "content": response}
+                        ]
+                    })
+
+    return examples
+
+examples = []
+for doc in kb_docs:
+    examples.extend(generate_diverse_examples(doc))
+
+random.shuffle(examples)
+print(f"Generated {len(examples)} diverse training examples")
+```
+
+### Split and save
+
+```python
+random.shuffle(examples)
+split_index = int(0.8 * len(examples))
+
+train_examples, validation_examples = examples[:split_index], examples[split_index:]
+
+train_file = DATA_DIR / "train.jsonl"
+validation_file = DATA_DIR / "validation.jsonl"
+
+with open(train_file, "w", encoding="utf-8") as f:
+    for example in train_examples:
+        f.write(json.dumps(example, ensure_ascii=False) + "\n")
+
+with open(validation_file, "w", encoding="utf-8") as f:
+    for example in validation_examples:
+        f.write(json.dumps(example, ensure_ascii=False) + "\n")
+
+print(f"Created {len(train_examples)} training and {len(validation_examples)} validation examples")
+```
+
+### Validate before uploading
+
+```python
+def validate_jsonl(file_path):
+    """Validate that the file is proper JSONL format for fine-tuning."""
+    with open(file_path, 'r', encoding='utf-8') as f:
+        line_count = 0
+        for line in f:
+            line_count += 1
+            try:
+                data = json.loads(line)
+                if 'messages' not in data:
+                    return False, f"Line {line_count} missing 'messages' field"
+                for msg in data['messages']:
+                    if 'role' not in msg or 'content' not in msg:
+                        return False, f"Line {line_count} has message missing 'role' or 'content'"
+                    if msg['role'] not in ['system', 'user', 'assistant']:
+                        return False, f"Line {line_count} has invalid role: {msg['role']}"
+            except json.JSONDecodeError:
+                return False, f"Line {line_count} is not valid JSON"
+    return True, f"Validated {line_count} examples"
+
+train_valid, train_msg = validate_jsonl(train_file)
+val_valid, val_msg = validate_jsonl(validation_file)
+
+print(f"Training file: {'OK' if train_valid else 'FAIL'} — {train_msg}")
+print(f"Validation file: {'OK' if val_valid else 'FAIL'} — {val_msg}")
+```
+
+## Upload files and launch the job
+
+```python
+import os
+import time
+import openai
+from openai import OpenAI
+from pathlib import Path
+
+client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+
+def upload(path):
+    """Upload a file to OpenAI for fine-tuning."""
+    with open(path, "rb") as file:
+        resp = client.files.create(
+            file=file,
+            purpose="fine-tune"
+        )
+    print(f"Uploaded {Path(path).name} → {resp.id}")
+    return resp.id
+
+train_file_id = upload(train_file)
+validation_file_id = upload(validation_file)
+
+job = client.fine_tuning.jobs.create(
+    training_file=train_file_id,
+    validation_file=validation_file_id,
+    model="gpt-4o-mini-2024-07-18",
+    suffix="banking-support"
+)
+
+print(f"Fine-tuning job created: {job.id}")
+print(f"Status: {job.status}")
+```
+
+## Monitor training
+
+```python
+while True:
+    status = client.fine_tuning.jobs.retrieve(job.id).status
+    print("Status:", status)
+    if status in ("succeeded", "failed", "cancelled"):
+        break
+    time.sleep(30)
+
+fine_tuned_model = openai.fine_tuning.jobs.retrieve(job.id).fine_tuned_model
+print("Fine-tuned model:", fine_tuned_model)
+```
+
+### Reading the loss curves
+
+The OpenAI dashboard shows two sets of metrics during training:
+
+<Tabs>
+  <Tab title="Loss curves">
+    | Metric | What to look for |
+    |---|---|
+    | Training loss (green) | Should decrease steadily each epoch |
+    | Validation loss (purple) | Should follow the training curve |
+    | Divergence | If validation loss rises while training loss falls, you have overfitting — reduce epochs or increase dataset size |
+  </Tab>
+  <Tab title="Accuracy curves">
+    | Metric | What to look for |
+    |---|---|
+    | Training accuracy (green) | Should increase steadily |
+    | Validation accuracy (purple) | Should stay close to training accuracy |
+    | Large gap | Indicates the model memorized training data instead of generalizing |
+  </Tab>
+</Tabs>
+
+## Use the fine-tuned model in a LangGraph agent
+
+```python
+from langchain_core.tools import tool
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage
+from langgraph.prebuilt import create_react_agent
+
+@tool
+def account_lookup(account_id: str) -> str:
+    """Look up account information by account ID (requires authentication)."""
+    return f"Account {account_id} information is available after authentication."
+
+@tool
+def transfer_payment(source_account: str, destination_account: str, amount: float) -> str:
+    """Transfer payment from one account to another."""
+    return f"Payment of {amount} from {source_account} to {destination_account} has been initiated."
+
+# Use the fine-tuned model
+domain_expert = ChatOpenAI(model=fine_tuned_model, temperature=0.0)
+
+agent = create_react_agent(
+    model=domain_expert,
+    tools=[account_lookup, transfer_payment]
+)
+
+test_queries = [
+    "What account types do you offer?",
+    "What are the fees for wire transfers?",
+    "I need information about overdraft protection"
+]
+
+for query in test_queries:
+    response = agent.invoke({"messages": [HumanMessage(content=query)]})
+    print("\nQuery:", query)
+    for msg in reversed(response["messages"]):
+        if hasattr(msg, "content") and msg.content and msg.__class__.__name__ == "AIMessage":
+            print("Response:", msg.content)
+            break
+```
+
+<Tip>
+If you need multiple specialized models in a single workflow, point each LangGraph node to a different fine-tuned model. The same base model can be fine-tuned multiple times with different datasets.
+</Tip>
+
+## Install and import
+
+<CodeGroup>
+
+```bash pip
+pip install --upgrade openai langchain langgraph tiktoken pandas scikit-learn
+```
+
+```bash conda
+conda install -c conda-forge openai langchain langgraph tiktoken pandas scikit-learn
+```
+
+</CodeGroup>
+
+## Best practices
+
+| Topic | Recommendation |
+|---|---|
+| Train/validation split | Reserve at least 10% for validation (ideally 40+ examples) |
+| Minimum examples | At least 10 examples per behavior you want to teach |
+| Diversity | Vary phrasing across questions and responses; keep style consistent |
+| Early stopping | Enabled by default — training stops automatically if validation loss stagnates |
+| Evaluation | Run BLEU or exact-match metrics on your own test set beyond the dashboard accuracy |
+
+<Warning>
+Do not include sensitive information (PII, passwords, API keys) in training data. Fine-tuned models can reproduce content from their training sets verbatim.
+</Warning>

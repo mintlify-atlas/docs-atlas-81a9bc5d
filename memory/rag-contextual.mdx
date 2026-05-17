@@ -1,0 +1,467 @@
+---
+title: "Production RAG agents with Contextual AI in 15 minutes"
+description: "Build a financial-document RAG agent on Contextual AI's platform. Covers datastore setup, document ingestion, agent config, querying, and LMUnit evaluation."
+---
+
+Traditional RAG implementations require you to manage vector databases, embedding models, chunking strategies, and retrieval-ranking pipelines—before writing a single line of application logic. Contextual AI's managed platform abstracts that infrastructure so you can focus on your use case. This tutorial walks you through creating a complete RAG agent for financial document analysis in under 15 minutes, entirely through a Python client.
+
+<CardGroup cols={2}>
+  <Card title="Managed infrastructure" icon="cloud">
+    No vector database or embedding model to configure. Contextual AI handles parsing, chunking, indexing, and retrieval.
+  </Card>
+  <Card title="Enterprise-grade document parsing" icon="file">
+    Handles complex tables, charts, multi-page hierarchical documents, PDFs, HTML, Word, and PowerPoint files.
+  </Card>
+  <Card title="Grounded responses" icon="shield-check">
+    The platform is designed to keep responses anchored to source documents, reducing hallucinations without additional prompt engineering.
+  </Card>
+  <Card title="LMUnit evaluation" icon="chart-bar">
+    Automated natural-language unit testing with scores on a continuous 1–5 scale. Evaluate accuracy, causation, synthesis, evidence, and more.
+  </Card>
+</CardGroup>
+
+## What you'll build
+
+A **financial document analysis agent** that:
+
+1. Ingests NVIDIA quarterly revenue reports and statistical analysis documents
+2. Answers natural-language questions about financial trends
+3. Returns inline citations linking responses to source pages
+4. Is evaluated across six quality dimensions using LMUnit
+
+## Prerequisites
+
+- A Contextual AI account and API key — create one at [app.contextual.ai](https://app.contextual.ai/)
+- Python 3.9+
+
+## Set up the environment
+
+Install the required packages:
+
+```bash
+pip install contextual-client matplotlib tqdm requests pandas python-dotenv
+```
+
+Import the libraries used throughout the tutorial:
+
+```python
+import os
+import json
+import requests
+from pathlib import Path
+from typing import List, Optional, Dict
+
+import pandas as pd
+from contextual import ContextualAI
+```
+
+## Step 1 — Authenticate
+
+Store your API key in a `.env` file and load it at runtime:
+
+```python
+from dotenv import load_dotenv
+
+try:
+    # Google Colab users can use Colab Secrets instead
+    from google.colab import userdata
+    API_KEY = userdata.get("CONTEXTUAL_API_KEY")
+except ImportError:
+    load_dotenv()
+    API_KEY = os.getenv("CONTEXTUAL_API_KEY")
+
+if not API_KEY:
+    raise ValueError(
+        "Set CONTEXTUAL_API_KEY in your .env file or as an environment variable."
+    )
+
+client = ContextualAI(api_key=API_KEY)
+```
+
+<Warning>
+Never commit your API key to source control. Use environment variables or a secrets manager in production.
+</Warning>
+
+## Step 2 — Create a datastore
+
+A **datastore** is a secure, isolated container for your documents and their processed representations. Each datastore provides optimised retrieval for a specific use case. Create one for the financial analysis agent:
+
+```python
+datastore_name = "Financial_Demo_RAG"
+
+# Reuse an existing datastore if one with this name already exists
+datastores = client.datastores.list()
+existing_datastore = next(
+    (ds for ds in datastores if ds.name == datastore_name), None
+)
+
+if existing_datastore:
+    datastore_id = existing_datastore.id
+    print(f"Using existing datastore: {datastore_id}")
+else:
+    result = client.datastores.create(name=datastore_name)
+    datastore_id = result.id
+    print(f"Created new datastore: {datastore_id}")
+```
+
+<Info>
+Each agent should have its own datastore to enforce data isolation between use cases and allow the platform to optimise retrieval for the specific document types and query patterns of that agent.
+</Info>
+
+## Step 3 — Ingest documents
+
+Contextual AI's parsing engine handles tables, charts, and multi-page hierarchical structure. The tutorial uses four sample documents that demonstrate challenging real-world scenarios:
+
+| File | Content |
+|---|---|
+| `A_Rev_by_Mkt_Qtrly_Trend_Q425.pdf` | NVIDIA quarterly revenue FY24/25 |
+| `B_Q423-Qtrly-Revenue-by-Market-slide.pdf` | NVIDIA quarterly revenue FY22/23 |
+| `C_Neptune.pdf` | Spurious correlations — Neptune's distance vs US burglary rates |
+| `D_Unilever.pdf` | Spurious correlations — Unilever revenue vs "lost my wallet" searches |
+
+### Download and upload
+
+```python
+if not os.path.exists("data"):
+    os.makedirs("data")
+
+files_to_upload = [
+    (
+        "A_Rev_by_Mkt_Qtrly_Trend_Q425.pdf",
+        "https://raw.githubusercontent.com/ContextualAI/examples/refs/heads/main/08-ai-workshop/data/A_Rev_by_Mkt_Qtrly_Trend_Q425.pdf",
+    ),
+    (
+        "B_Q423-Qtrly-Revenue-by-Market-slide.pdf",
+        "https://raw.githubusercontent.com/ContextualAI/examples/refs/heads/main/08-ai-workshop/data/B_Q423-Qtrly-Revenue-by-Market-slide.pdf",
+    ),
+    (
+        "C_Neptune.pdf",
+        "https://raw.githubusercontent.com/ContextualAI/examples/refs/heads/main/08-ai-workshop/data/C_Neptune.pdf",
+    ),
+    (
+        "D_Unilever.pdf",
+        "https://raw.githubusercontent.com/ContextualAI/examples/refs/heads/main/08-ai-workshop/data/D_Unilever.pdf",
+    ),
+]
+
+document_ids = []
+
+for filename, url in files_to_upload:
+    file_path = f"data/{filename}"
+
+    if not os.path.exists(file_path):
+        print(f"Fetching {file_path}")
+        try:
+            response = requests.get(url)
+            response.raise_for_status()
+            with open(file_path, "wb") as f:
+                f.write(response.content)
+        except Exception as e:
+            print(f"Error downloading {filename}: {e}")
+            continue
+
+    try:
+        with open(file_path, "rb") as f:
+            ingestion_result = client.datastores.documents.ingest(datastore_id, file=f)
+            document_ids.append(ingestion_result.id)
+            print(f"Uploaded {filename}")
+    except Exception as e:
+        print(f"Error uploading {filename}: {e}")
+
+print(f"\nUploaded {len(document_ids)} documents")
+print(f"Document IDs: {document_ids}")
+```
+
+### Check ingestion status
+
+```python
+metadata = client.datastores.documents.metadata(
+    datastore_id=datastore_id,
+    document_id=document_ids[0],
+)
+print("Document metadata:", metadata)
+```
+
+<Note>
+Ingestion may take a few minutes. The `status` field transitions from `processing` to `completed` once the platform has parsed, chunked, and indexed the document.
+</Note>
+
+## Step 4 — Create the agent
+
+Configure the agent with a system prompt that enforces grounded, concise responses and attach it to the datastore you created.
+
+```python
+system_prompt = """
+You are a helpful AI assistant created by Contextual AI to answer questions
+about relevant documentation provided to you. Your responses should be
+precise, accurate, and sourced exclusively from the provided information.
+
+Guidelines:
+* Only use information from the provided documentation.
+* Use the exact terminology found in the documentation.
+* Keep answers concise and relevant to the question.
+* Apply markdown for lists, tables, or code.
+* Directly answer the question, then STOP.
+* If the information is not in the documentation, say so and stop.
+"""
+
+agent_name = "Demo"
+
+agents = client.agents.list()
+existing_agent = next((a for a in agents if a.name == agent_name), None)
+
+if existing_agent:
+    agent_id = existing_agent.id
+    print(f"Using existing agent: {agent_id}")
+else:
+    app_response = client.agents.create(
+        name=agent_name,
+        description="Helpful Grounded AI Assistant",
+        datastore_ids=[datastore_id],
+        agent_configs={
+            "global_config": {
+                "enable_multi_turn": False,  # Deterministic for evaluation
+            }
+        },
+        suggested_queries=[
+            "What was NVIDIA's annual revenue by fiscal year 2022 to 2025?",
+            "When did NVIDIA's data center revenue overtake gaming revenue?",
+            "What's the correlation between Neptune's distance from the Sun and US burglary rates?",
+            "What's the correlation between Unilever Group's revenue and Google searches for 'lost my wallet'?",
+            "Does this imply that Unilever Group's revenue is derived from lost wallets?",
+        ],
+    )
+    agent_id = app_response.id
+    print(f"Agent created: {agent_id}")
+```
+
+<Tip>
+You can also configure and test your agent visually at app.contextual.ai. Changes made in the UI are immediately reflected in the API and vice versa.
+</Tip>
+
+## Step 5 — Query the agent
+
+### Single query
+
+```python
+query_result = client.agents.query.create(
+    agent_id=agent_id,
+    messages=[{
+        "content": "What was NVIDIA's annual revenue by fiscal year 2022 to 2025?",
+        "role": "user",
+    }],
+)
+print(query_result.message.content)
+```
+
+The response includes inline citations (e.g. `[1]()`) that link back to the exact page in the source document where each figure was found.
+
+**Example output:**
+
+```
+For Fiscal Year 2025, the quarterly revenues were $39,331M in Q4, $35,082M
+in Q3, $30,040M in Q2, and $26,044M in Q1.[1]()
+
+For Fiscal Year 2024, the quarterly figures were $22,103M in Q4, $18,120M
+in Q3, $13,507M in Q2, and $7,192M in Q1.[1]()
+```
+
+### Retrieve source pages
+
+You can fetch the actual document pages that informed a response, useful for audit trails and explainability:
+
+```python
+import base64, io
+from PIL import Image
+import matplotlib.pyplot as plt
+
+
+def display_base64_image(base64_string, title="Document"):
+    img_data = base64.b64decode(base64_string)
+    img = Image.open(io.BytesIO(img_data))
+    plt.figure(figsize=(10, 10))
+    plt.imshow(img)
+    plt.axis("off")
+    plt.title(title)
+    plt.show()
+
+
+for i, retrieval_content in enumerate(query_result.retrieval_contents):
+    ret_result = client.agents.query.retrieval_info(
+        message_id=query_result.message_id,
+        agent_id=agent_id,
+        content_ids=[retrieval_content.content_id],
+    )
+    if ret_result.content_metadatas and ret_result.content_metadatas[0].page_img:
+        display_base64_image(
+            ret_result.content_metadatas[0].page_img,
+            title=f"Source page {i + 1}",
+        )
+```
+
+## Step 6 — Evaluate with LMUnit
+
+Manual testing is not sufficient for production RAG systems. LMUnit is Contextual AI's automated evaluation framework that scores responses on a **continuous 1–5 scale** against natural-language unit tests.
+
+### Define unit tests
+
+Each unit test is a natural-language question that evaluates a specific quality dimension:
+
+```python
+unit_tests = [
+    "Does the response accurately extract specific numerical data from the documents?",
+    "Does the agent properly distinguish between correlation and causation?",
+    "Are multi-document comparisons performed correctly with accurate calculations?",
+    "Are potential limitations or uncertainties in the data clearly acknowledged?",
+    "Are quantitative claims properly supported with specific evidence from the source documents?",
+    "Does the response avoid unnecessary information?",
+]
+```
+
+### Run a single evaluation
+
+```python
+response = client.lmunit.create(
+    query="What was NVIDIA's Data Center revenue in Q4 FY25?",
+    response="""NVIDIA's Data Center revenue for Q4 FY25 was $35,580 million.[1]()
+
+    This represents an increase from Q3 FY25 ($30,771M), Q2 FY25 ($26,272M),
+    and Q1 FY25 ($22,563M).[1]()""",
+    unit_test="Does the response avoid unnecessary information?",
+)
+print(response)
+# LMUnitCreateResponse(score=2.338)
+```
+
+A score of 2.3 indicates the response included unnecessary quarterly trend data when the question only asked about Q4. Adjust the system prompt accordingly.
+
+### Build and evaluate a full dataset
+
+<Steps>
+  <Step title="Generate responses for all evaluation queries">
+```python
+queries = [
+    "What was NVIDIA's Data Center revenue in Q4 FY25?",
+    "What is the correlation coefficient between Neptune's distance from the Sun and US burglary rates?",
+    "How did NVIDIA's total revenue change from Q1 FY22 to Q4 FY25?",
+    "What are the four main reasons why spurious correlations work, according to the Tyler Vigen documents?",
+    "Why should we be skeptical of the correlation between Unilever's revenue and Google searches for 'lost my wallet'?",
+    "When did NVIDIA's data center revenue overtake gaming revenue?",
+]
+
+eval_df = pd.DataFrame({"prompt": queries, "response": ""})
+
+for index, row in eval_df.iterrows():
+    try:
+        result = client.agents.query.create(
+            agent_id=agent_id,
+            messages=[{"content": row["prompt"], "role": "user"}],
+        )
+        eval_df.at[index, "response"] = result.message.content
+    except Exception as e:
+        eval_df.at[index, "response"] = f"Error: {e}"
+
+eval_df.to_csv("eval_input.csv", index=False)
+print(eval_df[["prompt", "response"]])
+```
+  </Step>
+
+  <Step title="Run all unit tests across all responses">
+```python
+from tqdm import tqdm
+
+
+def run_unit_tests_with_progress(
+    df: pd.DataFrame,
+    unit_tests: List[str],
+) -> List[Dict]:
+    """Run unit tests with progress tracking and error handling."""
+    results = []
+
+    for idx in tqdm(range(len(df)), desc="Processing responses"):
+        row = df.iloc[idx]
+        row_results = []
+
+        for test in unit_tests:
+            try:
+                result = client.lmunit.create(
+                    query=row["prompt"],
+                    response=row["response"],
+                    unit_test=test,
+                )
+                row_results.append({
+                    "test": test,
+                    "score": result.score,
+                })
+            except Exception as e:
+                print(f"Error: prompt {idx}, test '{test}': {e}")
+                row_results.append({"test": test, "score": None, "error": str(e)})
+
+        results.append({
+            "prompt": row["prompt"],
+            "response": row["response"],
+            "test_results": row_results,
+        })
+
+    return results
+
+
+results = run_unit_tests_with_progress(eval_df, unit_tests)
+
+# Save for later analysis
+pd.DataFrame(
+    [(r["prompt"], r["response"], t["test"], t["score"])
+     for r in results for t in r["test_results"]],
+    columns=["prompt", "response", "test", "score"],
+).to_csv("unit_test_results.csv", index=False)
+```
+  </Step>
+
+  <Step title="Inspect results">
+```python
+for result in results[:2]:
+    print(f"\nPrompt: {result['prompt']}")
+    print("Test Results:")
+    for test_result in result["test_results"]:
+        score = test_result["score"]
+        print(f"  - {test_result['test'][:60]}... : {score:.2f}" if score else f"  - {test_result['test'][:60]}... : ERROR")
+```
+  </Step>
+</Steps>
+
+### LMUnit scoring guide
+
+| Score range | Interpretation |
+|---|---|
+| 4.5 – 5.0 | Excellent — fully satisfies the unit test criterion |
+| 3.0 – 4.4 | Good — minor gaps or unnecessary content |
+| 1.5 – 2.9 | Needs improvement — significant issues detected |
+| 1.0 – 1.4 | Poor — fails the criterion |
+
+<Tip>
+Use LMUnit scores to drive prompt iteration. If "avoid unnecessary information" scores consistently below 3.0, add explicit length constraints to your system prompt. If "causation vs correlation" scores low, add a dedicated instruction about distinguishing the two.
+</Tip>
+
+## Supported document formats
+
+<CardGroup cols={2}>
+  <Card title="PDF" icon="file-pdf">
+    Full support including tables, charts, embedded images, and multi-column layouts.
+  </Card>
+  <Card title="HTML" icon="code">
+    Web pages and HTML export files with preserved structure.
+  </Card>
+  <Card title="Word documents" icon="file-word">
+    DOC and DOCX with heading hierarchy and table extraction.
+  </Card>
+  <Card title="PowerPoint" icon="file-powerpoint">
+    PPT and PPTX with slide-level chunking and chart interpretation.
+  </Card>
+</CardGroup>
+
+## Next steps
+
+- Add additional financial documents to the datastore and re-run evaluation to measure the impact on retrieval quality.
+- Enable `enable_multi_turn: true` in `agent_configs` to support follow-up questions within a conversation.
+- Extend the LMUnit test suite with domain-specific criteria relevant to your use case, such as regulatory compliance checks or financial-calculation accuracy.
+- Explore the Contextual AI platform UI to visualise document processing status and iterate on agent configuration without code.

@@ -1,0 +1,496 @@
+---
+title: "Dual-memory architecture for agents with Redis"
+description: "Give agents persistent memory with Redis: short-term conversation state via LangGraph checkpointing and long-term semantic search with RedisVL vector indexes."
+---
+
+AI agents that forget everything between sessions cannot learn from past interactions or provide truly personalised responses. This tutorial shows you how to build a travel agent backed by a **dual-memory architecture**: a short-term buffer that tracks the current conversation and a long-term store that persists user preferences and domain knowledge across sessions—both powered by Redis.
+
+<CardGroup cols={2}>
+  <Card title="Short-term memory" icon="clock">
+    LangGraph's `RedisSaver` checkpointer stores full conversation state per thread, enabling multi-turn coherence without manual state passing.
+  </Card>
+  <Card title="Long-term memory" icon="database">
+    RedisVL indexes memories as semantic vectors, letting the agent retrieve relevant past facts using cosine similarity rather than keyword lookup.
+  </Card>
+  <Card title="Tool-based management" icon="wrench">
+    Memory operations are exposed as LangChain tools so the LLM decides autonomously when to store or retrieve facts.
+  </Card>
+  <Card title="Conversation summarisation" icon="compress">
+    When conversation history exceeds a configurable threshold, the agent summarises older turns to prevent context-window pollution.
+  </Card>
+</CardGroup>
+
+## Prerequisites
+
+<CardGroup cols={2}>
+  <Card title="OpenAI API key" icon="key">
+    A key with billing enabled is required for GPT-4o and `text-embedding-ada-002`.
+  </Card>
+  <Card title="Redis instance" icon="server">
+    Use a free Redis Cloud instance or run Redis Stack locally for vector-search support.
+  </Card>
+</CardGroup>
+
+## Set up the environment
+
+Install the Python packages needed for this tutorial.
+
+```bash
+pip install langchain-openai langgraph-checkpoint langgraph \
+            langgraph-checkpoint-redis langchain-redis redisvl ulid-py
+```
+
+<Note>
+You may need to restart your kernel after installation if you are working in a notebook.
+</Note>
+
+Export your OpenAI API key before running any code:
+
+```python
+import getpass
+import os
+
+def _set_env(key: str):
+    if key not in os.environ:
+        os.environ[key] = getpass.getpass(f"{key}:")
+
+_set_env("OPENAI_API_KEY")
+```
+
+## Connect to Redis
+
+```python
+import os
+from redis import Redis
+
+# Use the environment variable if set, otherwise default to localhost
+REDIS_URL = os.getenv("REDIS_URL", "redis://localhost:6379")
+
+redis_client = Redis.from_url(REDIS_URL)
+redis_client.ping()  # Raises ConnectionError if Redis is unavailable
+```
+
+<Tip>
+For a fully-managed, zero-ops experience, create a free instance at [redis.io/try-free](https://redis.io/try-free/). Copy the connection URL into your `REDIS_URL` environment variable.
+</Tip>
+
+## Define memory data models
+
+Before writing to Redis, define Pydantic models that describe each memory entry. The `MemoryType` enum separates user-specific experiences from general domain knowledge.
+
+```python
+import ulid
+from datetime import datetime
+from enum import Enum
+from typing import List, Optional
+from pydantic import BaseModel, Field
+
+
+class MemoryType(str, Enum):
+    """
+    EPISODIC: User-specific preferences and experiences.
+              e.g. "User prefers Delta airlines", "User visited Paris last year"
+
+    SEMANTIC: General domain knowledge.
+              e.g. "Singapore requires a valid passport"
+    """
+    EPISODIC = "episodic"
+    SEMANTIC = "semantic"
+
+
+class Memory(BaseModel):
+    """A single long-term memory entry."""
+    content: str
+    memory_type: MemoryType
+    metadata: str
+
+
+class Memories(BaseModel):
+    """Container returned by the LLM's structured-output extraction call."""
+    memories: List[Memory]
+
+
+class StoredMemory(Memory):
+    """A memory that has been persisted to Redis."""
+    id: str                                                  # Redis key
+    memory_id: ulid.ULID = Field(default_factory=ulid.ULID)
+    created_at: datetime = Field(default_factory=datetime.now)
+    user_id: Optional[str] = None
+    thread_id: Optional[str] = None
+    memory_type: Optional[MemoryType] = None
+```
+
+## Create the vector search index
+
+Long-term memories are stored as JSON documents in Redis. The `SearchIndex` schema defines how each field is indexed, including a FLAT vector index for cosine similarity search on 1536-dimensional OpenAI embeddings.
+
+```python
+from redisvl.index import SearchIndex
+from redisvl.schema.schema import IndexSchema
+
+memory_schema = IndexSchema.from_dict({
+    "index": {
+        "name": "agent_memories",
+        "prefix": "memory",
+        "key_separator": ":",
+        "storage_type": "json",
+    },
+    "fields": [
+        {"name": "content",      "type": "text"},
+        {"name": "memory_type",  "type": "tag"},
+        {"name": "metadata",     "type": "text"},
+        {"name": "created_at",   "type": "text"},
+        {"name": "user_id",      "type": "tag"},
+        {"name": "memory_id",    "type": "tag"},
+        {
+            "name": "embedding",
+            "type": "vector",
+            "attrs": {
+                "algorithm": "flat",
+                "dims": 1536,            # text-embedding-ada-002 output size
+                "distance_metric": "cosine",
+                "datatype": "float32",
+            },
+        },
+    ],
+})
+
+try:
+    long_term_memory_index = SearchIndex(
+        schema=memory_schema,
+        redis_client=redis_client,
+        validate_on_load=True,
+    )
+    long_term_memory_index.create(overwrite=True)
+    print("Long-term memory index ready")
+except Exception as e:
+    print(f"Error creating index: {e}")
+```
+
+Inspect the index at any time using the `rvl` CLI:
+
+```bash
+rvl index info -i agent_memories
+```
+
+## Implement memory operations
+
+### Check for duplicates
+
+Before storing a new memory, run a vector-range query to see whether a semantically similar one already exists. This prevents the index from accumulating redundant facts.
+
+```python
+from redisvl.query import VectorRangeQuery
+from redisvl.query.filter import Tag
+from redisvl.utils.vectorize.text.openai import OpenAITextVectorizer
+import logging
+
+openai_embed = OpenAITextVectorizer(model="text-embedding-ada-002")
+logger = logging.getLogger(__name__)
+SYSTEM_USER_ID = "system"
+
+
+def similar_memory_exists(
+    content: str,
+    memory_type: MemoryType,
+    user_id: str = SYSTEM_USER_ID,
+    thread_id: Optional[str] = None,
+    distance_threshold: float = 0.1,
+) -> bool:
+    """Return True if a similar memory already exists in Redis."""
+    content_embedding = openai_embed.embed(content)
+    filters = (Tag("user_id") == user_id) & (Tag("memory_type") == memory_type)
+    if thread_id:
+        filters = filters & (Tag("thread_id") == thread_id)
+
+    vector_query = VectorRangeQuery(
+        vector=content_embedding,
+        num_results=1,
+        vector_field_name="embedding",
+        filter_expression=filters,
+        distance_threshold=distance_threshold,
+        return_fields=["id"],
+    )
+    results = long_term_memory_index.query(vector_query)
+    return bool(results)
+```
+
+### Store a memory
+
+```python
+from datetime import datetime
+from typing import Optional
+import ulid
+
+
+def store_memory(
+    content: str,
+    memory_type: MemoryType,
+    user_id: str = SYSTEM_USER_ID,
+    thread_id: Optional[str] = None,
+    metadata: Optional[str] = None,
+):
+    """Store a long-term memory in Redis with built-in deduplication."""
+    if metadata is None:
+        metadata = "{}"
+
+    if similar_memory_exists(content, memory_type, user_id, thread_id):
+        logger.info("Similar memory found, skipping storage")
+        return
+
+    embedding = openai_embed.embed(content)
+    memory_data = {
+        "user_id": user_id or SYSTEM_USER_ID,
+        "content": content,
+        "memory_type": memory_type.value,
+        "metadata": metadata,
+        "created_at": datetime.now().isoformat(),
+        "embedding": embedding,
+        "memory_id": str(ulid.ULID()),
+        "thread_id": thread_id,
+    }
+
+    try:
+        long_term_memory_index.load([memory_data])
+        logger.info(f"Stored {memory_type} memory: {content}")
+    except Exception as e:
+        logger.error(f"Error storing memory: {e}")
+```
+
+### Retrieve relevant memories
+
+Semantic retrieval converts the natural-language query into a vector and returns the closest stored memories within a configurable distance threshold.
+
+```python
+from typing import List, Union
+
+def retrieve_memories(
+    query: str,
+    memory_type: Union[Optional[MemoryType], List[MemoryType]] = None,
+    user_id: str = SYSTEM_USER_ID,
+    thread_id: Optional[str] = None,
+    distance_threshold: float = 0.1,
+    limit: int = 5,
+) -> List[StoredMemory]:
+    """Retrieve relevant memories via vector similarity search."""
+    vector_query = VectorRangeQuery(
+        vector=openai_embed.embed(query),
+        return_fields=[
+            "content", "memory_type", "metadata",
+            "created_at", "memory_id", "thread_id", "user_id",
+        ],
+        num_results=limit,
+        vector_field_name="embedding",
+        dialect=2,
+        distance_threshold=distance_threshold,
+    )
+
+    # Build tag filters
+    base_filters = [f"@user_id:{{{user_id or SYSTEM_USER_ID}}}"]
+    if memory_type:
+        if isinstance(memory_type, list):
+            base_filters.append(f"@memory_type:{{{'|'.join(memory_type)}}}")
+        else:
+            base_filters.append(f"@memory_type:{{{memory_type.value}}}")
+    if thread_id:
+        base_filters.append(f"@thread_id:{{{thread_id}}}")
+
+    vector_query.set_filter(" ".join(base_filters))
+    results = long_term_memory_index.query(vector_query)
+
+    memories = []
+    for doc in results:
+        try:
+            memories.append(StoredMemory(
+                id=doc["id"],
+                memory_id=doc["memory_id"],
+                user_id=doc["user_id"],
+                thread_id=doc.get("thread_id"),
+                memory_type=MemoryType(doc["memory_type"]),
+                content=doc["content"],
+                created_at=doc["created_at"],
+                metadata=doc["metadata"],
+            ))
+        except Exception as e:
+            logger.error(f"Error parsing memory: {e}")
+    return memories
+```
+
+## Expose memory as agent tools
+
+Wrap the storage and retrieval functions as LangChain tools so the LLM can call them autonomously during conversation.
+
+<Tabs>
+  <Tab title="Store memory tool">
+```python
+from typing import Dict, Optional
+from langchain_core.tools import tool
+from langchain_core.runnables.config import RunnableConfig
+
+
+@tool
+def store_memory_tool(
+    content: str,
+    memory_type: MemoryType,
+    metadata: Optional[Dict[str, str]] = None,
+    config: Optional[RunnableConfig] = None,
+) -> str:
+    """
+    Store a long-term memory in the system.
+
+    Use this tool to save important information about user preferences,
+    experiences, or general knowledge for future interactions.
+    """
+    config = config or RunnableConfig()
+    user_id = config.get("user_id", SYSTEM_USER_ID)
+    thread_id = config.get("thread_id")
+
+    try:
+        store_memory(
+            content=content,
+            memory_type=memory_type,
+            user_id=user_id,
+            thread_id=thread_id,
+            metadata=str(metadata) if metadata else None,
+        )
+        return f"Successfully stored {memory_type} memory: {content}"
+    except Exception as e:
+        return f"Error storing memory: {str(e)}"
+```
+  </Tab>
+  <Tab title="Retrieve memories tool">
+```python
+@tool
+def retrieve_memories_tool(
+    query: str,
+    memory_type: List[MemoryType],
+    limit: int = 5,
+    config: Optional[RunnableConfig] = None,
+) -> str:
+    """
+    Retrieve long-term memories relevant to the query.
+
+    Use this tool to access previously stored information about user
+    preferences, experiences, or general knowledge.
+    """
+    config = config or RunnableConfig()
+    user_id = config.get("user_id", SYSTEM_USER_ID)
+
+    try:
+        stored_memories = retrieve_memories(
+            query=query,
+            memory_type=memory_type,
+            user_id=user_id,
+            limit=limit,
+            distance_threshold=0.3,
+        )
+        response = []
+        if stored_memories:
+            response.append("Long-term memories:")
+            for memory in stored_memories:
+                response.append(f"- [{memory.memory_type}] {memory.content}")
+        return "\n".join(response) if response else "No relevant memories found."
+    except Exception as e:
+        return f"Error retrieving memories: {str(e)}"
+```
+  </Tab>
+</Tabs>
+
+## Build the travel agent
+
+Combine short-term and long-term memory with a LangGraph ReAct agent.
+
+<Steps>
+  <Step title="Initialise the Redis checkpointer">
+```python
+from langgraph.checkpoint.redis import RedisSaver
+
+redis_saver = RedisSaver(redis_client=redis_client)
+redis_saver.setup()
+```
+  </Step>
+
+  <Step title="Configure the LLM and tools">
+```python
+from langchain_openai import ChatOpenAI
+
+tools = [store_memory_tool, retrieve_memories_tool]
+llm = ChatOpenAI(model="gpt-4o", temperature=0.7).bind_tools(tools)
+```
+  </Step>
+
+  <Step title="Assemble the ReAct agent">
+```python
+from langchain_core.messages import SystemMessage
+from langgraph.prebuilt.chat_agent_executor import create_react_agent
+
+travel_agent = create_react_agent(
+    model=llm,
+    tools=tools,
+    checkpointer=redis_saver,  # short-term memory
+    prompt=SystemMessage(content="""
+        You are a travel assistant helping users plan their trips.
+        You remember user preferences and provide personalised recommendations
+        based on past interactions.
+
+        Memory types available:
+        1. Short-term: the current conversation thread
+        2. Long-term:
+           - Episodic: user preferences (e.g. "User prefers window seats")
+           - Semantic: general travel knowledge and requirements
+
+        Always be helpful, personal, and context-aware.
+    """),
+)
+```
+  </Step>
+
+  <Step title="Respond to users">
+```python
+from langchain_core.messages import AIMessage, HumanMessage
+from langgraph.graph.message import MessagesState
+from langchain_core.runnables.config import RunnableConfig
+
+
+class RuntimeState(MessagesState):
+    pass
+
+
+def respond_to_user(state: RuntimeState, config: RunnableConfig) -> RuntimeState:
+    """Invoke the travel agent to generate a response."""
+    human_messages = [m for m in state["messages"] if isinstance(m, HumanMessage)]
+    if not human_messages:
+        return state
+
+    try:
+        result = travel_agent.invoke({"messages": state["messages"]}, config=config)
+        state["messages"].append(result["messages"][-1])
+    except Exception as e:
+        state["messages"].append(
+            AIMessage(content="I'm sorry, I encountered an error processing your request.")
+        )
+    return state
+```
+  </Step>
+</Steps>
+
+## Memory management strategies
+
+<CardGroup cols={2}>
+  <Card title="Tool-based (used here)" icon="robot">
+    The LLM decides when to call `store_memory_tool` or `retrieve_memories_tool`. Fewer Redis calls, lower token usage, but may miss some context.
+  </Card>
+  <Card title="Manual management" icon="hand">
+    Your application code calls storage and retrieval at fixed points in the workflow. Higher Redis call volume but fully deterministic behaviour.
+  </Card>
+</CardGroup>
+
+<Warning>
+Tool-based memory management introduces latency because the LLM must reason about whether a memory call is needed. For latency-sensitive applications, consider a hybrid approach: always retrieve on session start, then let the LLM decide when to store.
+</Warning>
+
+## Next steps
+
+- Extend the schema with additional metadata fields such as `confidence` or `source`.
+- Add a conversation-summarisation node to compress older turns before they are evicted from the context window.
+- Connect multiple agents to the same Redis index so they share a common long-term memory pool.

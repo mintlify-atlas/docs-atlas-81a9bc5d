@@ -1,0 +1,310 @@
+---
+title: "Run LLMs locally on your own hardware using Ollama"
+description: "Install Ollama, pull open-weight models, and replace cloud LLM calls with a local REST API — keeping all data on-premises with no per-token fees."
+---
+
+Ollama is a lightweight runtime that downloads quantised open-weight models and serves them through a local REST API on port `11434`. Because everything runs on your hardware, no data leaves the machine — making it ideal for sensitive workloads, air-gapped environments, and cost-conscious deployments where you want to avoid per-token charges.
+
+<Columns cols={3}>
+  <Card title="Data sovereignty" icon="shield">
+    Model weights and all inference stay on your hardware. Nothing is sent to external services.
+  </Card>
+  <Card title="Predictable costs" icon="circle-dollar-sign">
+    No per-token fees. You pay for hardware utilisation only, regardless of request volume.
+  </Card>
+  <Card title="Drop-in replacement" icon="plug">
+    Swap `ChatOpenAI` for `ChatOllama` in LangChain with one line. The rest of your agent code stays unchanged.
+  </Card>
+</Columns>
+
+## Prerequisites
+
+Before you start, confirm your machine meets these minimum requirements:
+
+| Resource | Minimum | Recommended |
+|----------|---------|-------------|
+| RAM | 8 GB | 16 GB+ |
+| Free storage | 10 GB | 20 GB+ |
+| CPU | Any modern x64 / ARM64 | — |
+| GPU | Optional | NVIDIA, AMD, or Apple Silicon |
+
+## Install Ollama
+
+<Tabs>
+  <Tab title="macOS / Linux">
+    ```bash
+    curl -fsSL https://ollama.com/install.sh | sh
+    ```
+  </Tab>
+  <Tab title="Windows">
+    Download and run the `.exe` installer from [ollama.com/download](https://ollama.com/download). Ollama starts automatically after installation — you can skip `ollama serve`.
+  </Tab>
+  <Tab title="Docker">
+    ```bash
+    docker run -d -p 11434:11434 --name ollama ollama/ollama
+    ```
+    See the [official Docker image guide](https://ollama.com/blog/ollama-is-now-available-as-an-official-docker-image) for GPU passthrough options.
+  </Tab>
+</Tabs>
+
+## Pull a model and start the server
+
+<Steps>
+  <Step title="Pull model weights">
+    `ollama pull` fetches the quantised `.gguf` weights and caches them locally. Browse all available models at [ollama.com/library](https://ollama.com/library).
+
+    ```bash
+    ollama pull llama3.1:8b
+    ```
+  </Step>
+  <Step title="Start the Ollama daemon">
+    ```bash
+    ollama serve
+    ```
+
+    <Note>
+      On Windows, Ollama starts automatically after installation. If you see "only one usage of each socket address is permitted", the daemon is already running — skip this step.
+    </Note>
+  </Step>
+  <Step title="Verify the server is ready">
+    ```bash
+    curl http://localhost:11434/api/chat -d '{
+      "model": "llama3.1:8b",
+      "messages": [{"role": "user", "content": "Hello!"}],
+      "stream": false
+    }'
+    ```
+
+    You should receive a JSON response with the model's reply in `message.content`.
+  </Step>
+</Steps>
+
+## Call the API from Python
+
+Ollama exposes a standard REST API that you can call with plain `requests` or use through the LangChain `ChatOllama` wrapper.
+
+### Replace OpenAI API calls
+
+<CodeGroup>
+
+```python before — OpenAI
+from openai import OpenAI
+
+prompt = "Hello!"
+client = OpenAI(api_key="your-key")
+response = client.chat.completions.create(
+    model="gpt-4",
+    messages=[{"role": "user", "content": prompt}]
+)
+print(response.choices[0].message.content)
+```
+
+```python after — Ollama
+import requests
+
+prompt = "Hello!"
+response = requests.post("http://localhost:11434/api/chat", json={
+    "model": "llama3.1:8b",
+    "messages": [{"role": "user", "content": prompt}],
+    "stream": False
+})
+data = response.json()
+print(data["message"]["content"])
+```
+
+</CodeGroup>
+
+### Replace LangChain models
+
+<CodeGroup>
+
+```python before — ChatOpenAI
+from langchain_openai import ChatOpenAI
+
+llm = ChatOpenAI(model="gpt-4")
+response = llm.invoke("Hello!")
+```
+
+```python after — ChatOllama
+from langchain_community.chat_models import ChatOllama
+
+llm = ChatOllama(model="llama3.1:8b")
+response = llm.invoke("Hello!")
+print(response.content)
+```
+
+</CodeGroup>
+
+## Tune model behaviour with API parameters
+
+Every request accepts a set of optional parameters that control how the model generates text.
+
+### Essential parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `model` | string | — | Required. Model identifier, e.g. `"llama3.1:8b"`. |
+| `messages` | array | — | Chat history as `{role, content}` objects. |
+| `stream` | boolean | `true` | Stream tokens as they are generated. Use `false` to wait for the full response. |
+| `temperature` | float | `0.8` | Controls randomness. `0.0` is deterministic; `2.0` is highly random. |
+| `top_p` | float | `0.9` | Nucleus sampling threshold. Lower values produce more conservative outputs. |
+| `num_predict` | int | `128` | Maximum tokens to generate. `-1` means unlimited. |
+| `repeat_penalty` | float | `1.1` | Penalises repeated phrases. Increase to `1.2–1.5` if the model loops. |
+| `system` | string | — | System prompt that sets the assistant's persona or task. |
+| `stop` | array | — | Stop generation when any of these strings are encountered. |
+
+### Performance parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `num_ctx` | int | `2048` | Context window size in tokens. |
+| `num_gpu` | int | `-1` | GPU layers to offload. `-1` is auto; `0` forces CPU-only. |
+| `keep_alive` | string | — | Keep model loaded after a request (e.g. `"5m"`, `"-1"` for forever). |
+
+### Example: tuned API call
+
+```python
+import requests
+
+response = requests.post("http://localhost:11434/api/chat", json={
+    "model": "llama3.1:8b",
+    "messages": [{"role": "user", "content": "Explain quantum computing"}],
+    "stream": False,
+    "temperature": 0.3,      # Lower for factual responses
+    "top_p": 0.9,            # Nucleus sampling
+    "num_predict": 500,      # Limit response length
+    "repeat_penalty": 1.2,   # Reduce repetition
+    "stop": ["```", "---"]   # Stop at code blocks or separators
+})
+data = response.json()
+print(data["message"]["content"])
+```
+
+### Example: LangChain with parameters
+
+```python
+from langchain_community.chat_models import ChatOllama
+
+llm = ChatOllama(
+    model="llama3.1:8b",
+    temperature=0.7,
+    top_p=0.9,
+    num_predict=256,
+    repeat_penalty=1.1
+)
+response = llm.invoke("Hello!")
+print(response.content)
+```
+
+<Tip>
+Set `keep_alive` to avoid reloading model weights between requests. Use `stream: false` to simplify response handling, and keep `num_predict` small to reduce latency in agent loops.
+</Tip>
+
+<Warning>
+Large `num_ctx` values require proportionally more RAM or VRAM. Start with the default `2048` and increase only if your use case needs longer context.
+</Warning>
+
+## Build a LangChain analysis agent
+
+The following agent classifies text, extracts key points, and summarises it — using only a local Ollama model.
+
+```python
+import asyncio
+from typing import Dict, List
+from langchain_community.chat_models import ChatOllama
+from langchain_core.prompts import ChatPromptTemplate
+
+class SimpleAnalysisAgent:
+    """A simple agent that analyzes text and provides insights."""
+
+    def __init__(self, model_name: str = "llama3.1:8b"):
+        self.llm = ChatOllama(model=model_name, temperature=0.1)
+
+    def classify_text(self, text: str) -> str:
+        """Classify the type of text."""
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", "Classify this text as one of: news, blog, email, code, academic, or other. Respond with just the category."),
+            ("human", "{text}")
+        ])
+        chain = prompt | self.llm
+        result = chain.invoke({"text": text[:500]})
+        return result.content.strip().lower()
+
+    def extract_key_points(self, text: str) -> List[str]:
+        """Extract key points from text."""
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", "Extract 3-5 key points from this text. Return as a simple numbered list."),
+            ("human", "{text}")
+        ])
+        chain = prompt | self.llm
+        result = chain.invoke({"text": text})
+        lines = result.content.strip().split('\n')
+        return [l.strip() for l in lines if l.strip() and any(c.isdigit() for c in l[:3])][:5]
+
+    def summarize(self, text: str) -> str:
+        """Create a summary of the text."""
+        prompt = ChatPromptTemplate.from_messages([
+            ("system", "Summarize this text in 2-3 sentences. Be concise and clear."),
+            ("human", "{text}")
+        ])
+        chain = prompt | self.llm
+        result = chain.invoke({"text": text})
+        return result.content.strip()
+
+    def analyze_text(self, text: str) -> Dict:
+        """Complete analysis of text."""
+        return {
+            "category": self.classify_text(text),
+            "key_points": self.extract_key_points(text),
+            "summary": self.summarize(text),
+            "length": len(text)
+        }
+```
+
+Install dependencies before running:
+
+```bash
+pip install langchain langchain-community requests
+```
+
+## Choose the right model
+
+| Model | RAM needed | Best for | Speed |
+|-------|-----------|----------|-------|
+| `llama3.1:8b` | 8 GB | General use, agents | Fast |
+| `qwen2.5:14b` | 14 GB | Code, reasoning | Medium |
+| `phi3:14b` | 14 GB | Efficient tasks | Fast |
+| `mistral:7b` | 7 GB | Simple tasks | Very fast |
+
+## Troubleshoot common issues
+
+<AccordionGroup>
+  <Accordion title="Model not found">
+    Pull the model before running:
+
+    ```bash
+    ollama pull <model-name>
+    ```
+  </Accordion>
+  <Accordion title="Connection refused">
+    Start the Ollama daemon:
+
+    ```bash
+    ollama serve
+    ```
+  </Accordion>
+  <Accordion title="Out of memory">
+    Switch to a smaller model such as `mistral:7b`, or set `num_gpu 0` to run on CPU and reduce VRAM pressure.
+  </Accordion>
+</AccordionGroup>
+
+## Next steps
+
+<Columns cols={2}>
+  <Card title="Deploy on RunPod GPU" icon="microchip" href="/deployment/gpu-runpod">
+    Package Ollama and your agent into a Docker image and deploy it to RunPod's serverless GPU infrastructure for scalable cloud inference.
+  </Card>
+  <Card title="Containerize with Docker" icon="box" href="/deployment/docker">
+    Mount local model weights into a container so your Ollama-backed agent runs identically on any host.
+  </Card>
+</Columns>

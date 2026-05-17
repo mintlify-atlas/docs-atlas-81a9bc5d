@@ -1,0 +1,353 @@
+---
+title: "Stateful agent workflows with LangGraph directed graphs"
+description: "Build production-ready AI agents as directed graphs. Model state, connect processing nodes, and add conditional routing to control flow at every step."
+---
+
+LangGraph is a framework by LangChain for building stateful, multi-step agent applications. Instead of writing imperative loops, you describe your agent as a directed graph: nodes define what the agent can do, edges define the order in which it does things, and a shared state object carries data between steps. This graph-based model makes it straightforward to add, remove, or reroute steps without touching unrelated code.
+
+<CardGroup cols={3}>
+  <Card title="Typed state" icon="database">
+    Use Python `TypedDict` to define exactly what data flows through your graph.
+  </Card>
+  <Card title="Composable nodes" icon="puzzle">
+    Each node is a plain function—easy to test, easy to swap.
+  </Card>
+  <Card title="Conditional routing" icon="git-branch">
+    Branch execution paths at runtime based on what the agent has learned so far.
+  </Card>
+</CardGroup>
+
+## Prerequisites
+
+Install the required packages:
+
+```bash
+pip install langgraph langchain langchain-openai python-dotenv
+```
+
+Set your OpenAI API key:
+
+```bash
+export OPENAI_API_KEY="sk-..."
+```
+
+## Core concepts
+
+A LangGraph application has three building blocks:
+
+| Concept | Purpose |
+|---|---|
+| **State** | A `TypedDict` that holds all data shared across nodes |
+| **Node** | A Python function that reads state and returns a partial update |
+| **Edge** | A connection that routes execution from one node to the next |
+
+You assemble these into a `StateGraph`, then call `.compile()` to get a runnable application.
+
+## Building a text analysis pipeline
+
+The tutorial in this repository walks through a multi-step text analysis agent that classifies a document, extracts entities, and summarizes it—all in a single graph invocation.
+
+### Define the state
+
+Every node in the graph reads from and writes to this shared object. Use `TypedDict` so Python can enforce the shape at type-check time:
+
+```python
+from typing import TypedDict, List
+
+class State(TypedDict):
+    text: str
+    classification: str
+    entities: List[str]
+    summary: str
+```
+
+### Create processing nodes
+
+Each node is a function that accepts the current state and returns a dictionary with only the fields it wants to update. LangGraph merges that dictionary back into the full state automatically:
+
+```python
+from langchain_core.prompts import PromptTemplate
+from langchain_core.messages import HumanMessage
+from langchain_openai import ChatOpenAI
+
+llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+
+def classification_node(state: State):
+    """Classify text into News, Blog, Research, or Other."""
+    prompt = PromptTemplate(
+        input_variables=["text"],
+        template="Classify the following text into one of the categories: "
+                 "News, Blog, Research, or Other.\n\nText:{text}\n\nCategory:"
+    )
+    message = HumanMessage(content=prompt.format(text=state["text"]))
+    classification = llm.invoke([message]).content.strip()
+    return {"classification": classification}
+
+def entity_extraction_node(state: State):
+    """Extract Person, Organization, and Location entities."""
+    prompt = PromptTemplate(
+        input_variables=["text"],
+        template="Extract all the entities (Person, Organization, Location) from the "
+                 "following text. Provide the result as a comma-separated list.\n\n"
+                 "Text:{text}\n\nEntities:"
+    )
+    message = HumanMessage(content=prompt.format(text=state["text"]))
+    entities = llm.invoke([message]).content.strip().split(", ")
+    return {"entities": entities}
+
+def summarization_node(state: State):
+    """Summarize the text in one short sentence."""
+    prompt = PromptTemplate(
+        input_variables=["text"],
+        template="Summarize the following text in one short sentence.\n\n"
+                 "Text:{text}\n\nSummary:"
+    )
+    message = HumanMessage(content=prompt.format(text=state["text"]))
+    summary = llm.invoke([message]).content.strip()
+    return {"summary": summary}
+```
+
+### Assemble and compile the graph
+
+Connect the nodes with edges, set an entry point, and compile:
+
+```python
+from langgraph.graph import StateGraph, END
+
+workflow = StateGraph(State)
+
+# Register nodes
+workflow.add_node("classification_node", classification_node)
+workflow.add_node("entity_extraction", entity_extraction_node)
+workflow.add_node("summarization", summarization_node)
+
+# Wire the edges
+workflow.set_entry_point("classification_node")
+workflow.add_edge("classification_node", "entity_extraction")
+workflow.add_edge("entity_extraction", "summarization")
+workflow.add_edge("summarization", END)
+
+# Compile into a runnable app
+app = workflow.compile()
+```
+
+### Invoke the graph
+
+Pass an initial state dictionary and read back the fully populated result:
+
+```python
+sample_text = """
+OpenAI has announced the GPT-4 model, which is a large multimodal model that
+exhibits human-level performance on various professional benchmarks.
+"""
+
+result = app.invoke({"text": sample_text})
+
+print("Classification:", result["classification"])
+print("Entities:", result["entities"])
+print("Summary:", result["summary"])
+```
+
+## Adding conditional edges
+
+A linear graph runs every node unconditionally. Conditional edges let you skip steps or take different paths based on runtime data. Define a routing function that returns a key, then map each key to a destination node:
+
+<Steps>
+  <Step title="Extend the state">
+    Add any fields the routing function needs to read:
+
+    ```python
+    class EnhancedState(TypedDict):
+        text: str
+        classification: str
+        entities: List[str]
+        summary: str
+        sentiment: str
+    ```
+  </Step>
+  <Step title="Write a routing function">
+    Return a value that `add_conditional_edges` will use as a lookup key:
+
+    ```python
+    def route_after_classification(state: EnhancedState) -> bool:
+        category = state["classification"].lower()
+        # Extract entities only for News and Research articles
+        return category in ["news", "research"]
+    ```
+  </Step>
+  <Step title="Define a sentiment node">
+    ```python
+    def sentiment_node(state: EnhancedState):
+        """Analyze sentiment: Positive, Negative, or Neutral."""
+        prompt = PromptTemplate(
+            input_variables=["text"],
+            template="Analyze the sentiment of the following text. "
+                     "Is it Positive, Negative, or Neutral?\n\nText:{text}\n\nSentiment:"
+        )
+        message = HumanMessage(content=prompt.format(text=state["text"]))
+        sentiment = llm.invoke([message]).content.strip()
+        return {"sentiment": sentiment}
+    ```
+  </Step>
+  <Step title="Build the conditional graph">
+    ```python
+    conditional_workflow = StateGraph(EnhancedState)
+
+    conditional_workflow.add_node("classification_node", classification_node)
+    conditional_workflow.add_node("entity_extraction", entity_extraction_node)
+    conditional_workflow.add_node("summarization", summarization_node)
+    conditional_workflow.add_node("sentiment_analysis", sentiment_node)
+
+    conditional_workflow.set_entry_point("classification_node")
+
+    # Branch: News/Research → entity extraction; everything else → summarization
+    conditional_workflow.add_conditional_edges(
+        "classification_node",
+        route_after_classification,
+        path_map={
+            True: "entity_extraction",
+            False: "summarization"
+        }
+    )
+
+    conditional_workflow.add_edge("entity_extraction", "summarization")
+    conditional_workflow.add_edge("summarization", "sentiment_analysis")
+    conditional_workflow.add_edge("sentiment_analysis", END)
+
+    conditional_app = conditional_workflow.compile()
+    ```
+  </Step>
+  <Step title="Test both branches">
+    ```python
+    # News article → goes through entity extraction
+    news_text = """
+    OpenAI released the GPT-4 model with enhanced performance on academic
+    and professional tasks.
+    """
+    result = conditional_app.invoke({"text": news_text})
+    print("Classification:", result["classification"])
+    print("Entities:", result.get("entities", "Skipped"))
+    print("Summary:", result["summary"])
+    print("Sentiment:", result["sentiment"])
+
+    # Blog post → skips entity extraction
+    blog_text = """
+    Here's what I learned from a week of meditating in silence.
+    No phones, no talking—just me, my breath, and some deep realizations.
+    """
+    result = conditional_app.invoke({"text": blog_text})
+    print("Classification:", result["classification"])
+    print("Entities:", result.get("entities", "Skipped (not applicable)"))
+    print("Summary:", result["summary"])
+    print("Sentiment:", result["sentiment"])
+    ```
+  </Step>
+</Steps>
+
+## Visualizing the workflow
+
+LangGraph can render a Mermaid diagram of any compiled graph, which is useful for reviewing the structure before deploying:
+
+```python
+from langchain_core.runnables.graph import MermaidDrawMethod
+from IPython.display import display, Image
+
+display(
+    Image(
+        app.get_graph().draw_mermaid_png(
+            draw_method=MermaidDrawMethod.API,
+        )
+    )
+)
+```
+
+<Tip>
+Run this in a Jupyter notebook to get an interactive diagram. If Mermaid rendering is unavailable, the graph structure is still printed as text: `classification_node → entity_extraction → summarization → END`.
+</Tip>
+
+## Full working example
+
+<Accordion title="Complete pipeline script">
+
+```python
+import os
+from typing import TypedDict, List
+from langchain_core.prompts import PromptTemplate
+from langchain_core.messages import HumanMessage
+from langchain_openai import ChatOpenAI
+from langgraph.graph import StateGraph, END
+from dotenv import load_dotenv
+
+load_dotenv()
+os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY")
+
+llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+
+class State(TypedDict):
+    text: str
+    classification: str
+    entities: List[str]
+    summary: str
+
+def classification_node(state: State):
+    prompt = PromptTemplate(
+        input_variables=["text"],
+        template="Classify the following text into one of the categories: "
+                 "News, Blog, Research, or Other.\n\nText:{text}\n\nCategory:"
+    )
+    message = HumanMessage(content=prompt.format(text=state["text"]))
+    return {"classification": llm.invoke([message]).content.strip()}
+
+def entity_extraction_node(state: State):
+    prompt = PromptTemplate(
+        input_variables=["text"],
+        template="Extract all the entities (Person, Organization, Location) from the "
+                 "following text. Provide the result as a comma-separated list.\n\n"
+                 "Text:{text}\n\nEntities:"
+    )
+    message = HumanMessage(content=prompt.format(text=state["text"]))
+    return {"entities": llm.invoke([message]).content.strip().split(", ")}
+
+def summarization_node(state: State):
+    prompt = PromptTemplate(
+        input_variables=["text"],
+        template="Summarize the following text in one short sentence.\n\n"
+                 "Text:{text}\n\nSummary:"
+    )
+    message = HumanMessage(content=prompt.format(text=state["text"]))
+    return {"summary": llm.invoke([message]).content.strip()}
+
+workflow = StateGraph(State)
+workflow.add_node("classification_node", classification_node)
+workflow.add_node("entity_extraction", entity_extraction_node)
+workflow.add_node("summarization", summarization_node)
+workflow.set_entry_point("classification_node")
+workflow.add_edge("classification_node", "entity_extraction")
+workflow.add_edge("entity_extraction", "summarization")
+workflow.add_edge("summarization", END)
+app = workflow.compile()
+
+sample_text = """
+OpenAI has announced the GPT-4 model, which is a large multimodal model that
+exhibits human-level performance on various professional benchmarks. It is developed
+to improve the alignment and safety of AI systems.
+"""
+
+result = app.invoke({"text": sample_text})
+print("Classification:", result["classification"])
+print("Entities:", result["entities"])
+print("Summary:", result["summary"])
+```
+
+</Accordion>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Add state persistence" icon="floppy-disk">
+    LangGraph supports checkpointers that save state between invocations, enabling multi-turn conversations and resumable workflows.
+  </Card>
+  <Card title="Deploy as an API" icon="server">
+    Wrap your compiled graph in a FastAPI endpoint to serve it over HTTP. See the FastAPI framework guide for patterns.
+  </Card>
+</CardGroup>

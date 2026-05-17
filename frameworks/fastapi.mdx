@@ -1,0 +1,396 @@
+---
+title: "Deploying AI agents as production APIs with FastAPI"
+description: "Wrap any AI agent in a production-ready HTTP API. Covers synchronous endpoints, token streaming with SSE, Pydantic request models, and API key auth."
+---
+
+FastAPI is a high-performance Python web framework built on Starlette and Pydantic. It combines native `async`/`await` support with automatic request validation and interactive API documentation out of the box. For AI agents, this means you can expose synchronous responses and streaming token output from the same application with minimal boilerplate.
+
+<CardGroup cols={3}>
+  <Card title="Sync + streaming" icon="bolt">
+    Serve both blocking responses and real-time token streams from the same app.
+  </Card>
+  <Card title="Automatic docs" icon="book-open">
+    FastAPI generates `/docs` and `/redoc` pages from your code with no extra configuration.
+  </Card>
+  <Card title="Type validation" icon="check">
+    Pydantic models validate every incoming request before it reaches your agent.
+  </Card>
+</CardGroup>
+
+## Prerequisites
+
+Install the required packages:
+
+```bash
+pip install fastapi uvicorn pydantic sse-starlette
+```
+
+## The agent class
+
+Start with any agent implementation. The example below uses a simple class with both a synchronous method and an async generator—the same pattern works with LangChain, LangGraph, or any other framework:
+
+```python
+import asyncio
+
+class SimpleAgent:
+    def __init__(self, name="FastAPI Agent"):
+        self.name = name
+
+    def generate_response(self, query: str) -> str:
+        """Generate a synchronous response to a user query."""
+        return (
+            f"Agent {self.name} received: '{query}'\n"
+            "Response: This is a simulated agent response."
+        )
+
+    async def generate_response_stream(self, query: str):
+        """Generate a streaming response token by token."""
+        prefix = f"Agent {self.name} thinking about: '{query}'\n"
+        response = "This is a simulated agent response that streams token by token."
+
+        yield prefix
+
+        for token in response.split():
+            await asyncio.sleep(0.1)  # Simulate generation latency
+            yield token + " "
+```
+
+## Request and response models
+
+Use Pydantic `BaseModel` to declare the shape of your API's inputs and outputs. FastAPI reads these definitions to validate incoming JSON and generate the `/docs` schema automatically:
+
+```python
+from pydantic import BaseModel
+from typing import Optional
+
+class QueryRequest(BaseModel):
+    query: str
+    context: Optional[str] = None
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "query": "What is FastAPI?",
+                "context": "I'm a beginner programmer."
+            }
+        }
+
+class QueryResponse(BaseModel):
+    response: str
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "response": "FastAPI is a modern, high-performance web framework."
+            }
+        }
+```
+
+## Assembling the application
+
+Create the `FastAPI` instance, register the agent, and add the endpoints:
+
+<Tabs>
+  <Tab title="Sync endpoint">
+    ```python
+    from fastapi import FastAPI
+    from pydantic import BaseModel
+    from typing import Optional
+
+    app = FastAPI(
+        title="Agent API",
+        description="A simple API that serves an AI agent",
+        version="0.1.0"
+    )
+
+    agent = SimpleAgent()
+
+    @app.get("/health")
+    def health_check():
+        """Check if the API is running."""
+        return {"status": "ok", "message": "API is operational"}
+
+    @app.post("/agent", response_model=QueryResponse)
+    def query_agent(request: QueryRequest):
+        """Get a synchronous response from the agent."""
+        response = agent.generate_response(request.query)
+        return QueryResponse(response=response)
+    ```
+  </Tab>
+  <Tab title="Streaming endpoint">
+    ```python
+    from fastapi.responses import StreamingResponse
+    import json
+
+    @app.post("/agent/stream")
+    async def stream_agent(request: QueryRequest):
+        """Stream a response from the agent token by token."""
+
+        async def event_generator():
+            async for token in agent.generate_response_stream(request.query):
+                data = json.dumps({"token": token})
+                yield f"data: {data}\n\n"
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream"
+        )
+    ```
+
+    <Note>
+    The `text/event-stream` media type signals to clients that they should read the response incrementally rather than waiting for the body to complete.
+    </Note>
+  </Tab>
+  <Tab title="SSE with sse-starlette">
+    ```python
+    from sse_starlette.sse import EventSourceResponse
+    import json
+
+    @app.post("/agent/stream-sse")
+    async def stream_agent_sse(request: QueryRequest):
+        """Stream a response using the sse-starlette package."""
+
+        async def event_generator():
+            async for token in agent.generate_response_stream(request.query):
+                yield {"data": json.dumps({"token": token})}
+
+        return EventSourceResponse(event_generator())
+    ```
+
+    <Tip>
+    `EventSourceResponse` from `sse-starlette` handles reconnection headers, event IDs, and keep-alive pings automatically, making it a better choice for production deployments.
+    </Tip>
+  </Tab>
+</Tabs>
+
+## The complete `fastapi_agent.py`
+
+The production-ready version of the script—saved as `scripts/fastapi_agent.py` in the tutorial—combines all of the above:
+
+```python
+from fastapi import FastAPI, Depends, HTTPException, Header
+from fastapi.responses import StreamingResponse
+from pydantic import BaseModel
+from typing import Optional
+import json
+import os
+import asyncio
+
+
+class SimpleAgent:
+    def __init__(self, name="FastAPI Agent"):
+        self.name = name
+
+    def generate_response(self, query: str) -> str:
+        return (
+            f"Agent {self.name} received: '{query}'\n"
+            "Response: This is a simulated agent response."
+        )
+
+    async def generate_response_stream(self, query: str):
+        prefix = f"Agent {self.name} thinking about: '{query}'\n"
+        response = "This is a simulated agent response that streams token by token."
+        yield prefix
+        for token in response.split():
+            await asyncio.sleep(0.1)
+            yield token + " "
+
+
+class QueryRequest(BaseModel):
+    query: str
+    context: Optional[str] = None
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "query": "What is FastAPI?",
+                "context": "I'm a beginner programmer."
+            }
+        }
+
+
+class QueryResponse(BaseModel):
+    response: str
+
+    class Config:
+        schema_extra = {
+            "example": {
+                "response": "FastAPI is a modern, high-performance web framework."
+            }
+        }
+
+
+app = FastAPI(
+    title="Agent API",
+    description="A simple API that serves an AI agent",
+    version="0.1.0"
+)
+
+agent = SimpleAgent()
+
+
+@app.get("/health")
+def health_check():
+    return {"status": "ok", "message": "API is operational"}
+
+
+@app.post("/agent", response_model=QueryResponse)
+def query_agent(request: QueryRequest):
+    response = agent.generate_response(request.query)
+    return QueryResponse(response=response)
+
+
+@app.post("/agent/stream")
+async def stream_agent(request: QueryRequest):
+    async def event_generator():
+        async for token in agent.generate_response_stream(request.query):
+            data = json.dumps({"token": token})
+            yield f"data: {data}\n\n"
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream"
+    )
+```
+
+## Running the server
+
+Use the provided `run_server.py` helper, which sets the working directory correctly before launching uvicorn:
+
+```bash
+python run_server.py
+```
+
+Or run uvicorn directly from within the `fastapi-agent` directory:
+
+```bash
+uvicorn scripts.fastapi_agent:app --reload
+```
+
+Once running, open these URLs in your browser:
+
+| URL | Purpose |
+|---|---|
+| `http://localhost:8000/health` | Health check |
+| `http://localhost:8000/docs` | Interactive Swagger UI |
+| `http://localhost:8000/redoc` | ReDoc documentation |
+
+## Testing the endpoints
+
+```python
+import requests
+import json
+
+# Synchronous endpoint
+response = requests.post(
+    "http://localhost:8000/agent",
+    json={"query": "What is FastAPI?"}
+)
+print("Sync response:", response.json())
+
+# Streaming endpoint
+response = requests.post(
+    "http://localhost:8000/agent/stream",
+    json={"query": "Tell me about streaming"},
+    stream=True
+)
+print("Streaming response:")
+for line in response.iter_lines():
+    if line:
+        decoded = line.decode("utf-8")
+        if decoded.startswith("data: "):
+            data = json.loads(decoded[6:])
+            print(data["token"], end="")
+```
+
+## Adding API key authentication
+
+For production use, protect your endpoints with an API key check. FastAPI's dependency injection makes this a clean, reusable pattern:
+
+```python
+from fastapi import Depends, HTTPException, Header
+import os
+
+async def verify_api_key(x_api_key: str = Header(None)):
+    """Verify the API key provided in the X-API-Key header."""
+    api_key = os.environ.get("API_KEY")
+
+    # If no key is configured in the environment, skip validation
+    if not api_key:
+        return True
+
+    if not x_api_key:
+        raise HTTPException(status_code=401, detail="API Key is missing")
+
+    if x_api_key != api_key:
+        raise HTTPException(status_code=403, detail="Invalid API Key")
+
+    return True
+
+# Inject the dependency into any endpoint
+@app.post("/agent", response_model=QueryResponse)
+def query_agent(
+    request: QueryRequest,
+    authorized: bool = Depends(verify_api_key)
+):
+    response = agent.generate_response(request.query)
+    return QueryResponse(response=response)
+```
+
+Set the `API_KEY` environment variable before starting the server:
+
+```bash
+export API_KEY="your-secret-key"
+python run_server.py
+```
+
+<Warning>
+Never hardcode API keys in source code. Always read them from environment variables or a secrets manager.
+</Warning>
+
+## Unit tests
+
+FastAPI ships with a `TestClient` that runs your app in-process without needing a running server:
+
+```python
+from fastapi.testclient import TestClient
+from scripts.fastapi_agent import app
+
+client = TestClient(app)
+
+def test_health_check():
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+
+def test_agent_endpoint():
+    response = client.post(
+        "/agent",
+        json={"query": "Test query"}
+    )
+    assert response.status_code == 200
+    assert "response" in response.json()
+    assert "Agent" in response.json()["response"]
+
+def test_stream_endpoint():
+    with client.stream("POST", "/agent/stream", json={"query": "Test query"}) as response:
+        assert response.status_code == 200
+        assert response.headers["content-type"] == "text/event-stream"
+```
+
+Run the tests with pytest:
+
+```bash
+pytest -xvs tests/test_fastapi_agent.py
+```
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Containerize with Docker" icon="docker">
+    Package your FastAPI app in a Docker container for consistent deployments across environments.
+  </Card>
+  <Card title="Add LangGraph" icon="git-branch">
+    Replace `SimpleAgent` with a compiled LangGraph workflow to serve stateful, multi-step agents through the same API surface.
+  </Card>
+</CardGroup>

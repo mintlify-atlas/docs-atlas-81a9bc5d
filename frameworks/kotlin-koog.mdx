@@ -1,0 +1,418 @@
+---
+title: "Building production AI agents in Kotlin with JetBrains Koog"
+description: "Build LLM-powered agents on the JVM using JetBrains' Koog framework. Covers project setup, tool calling with annotations, and typed structured output."
+---
+
+Kotlin powers a significant portion of backend infrastructure across the JVM ecosystem, yet most AI agent tutorials target Python exclusively. [Koog](https://github.com/JetBrains/koog) is JetBrains' open-source framework that brings first-class agent development to Kotlin, leveraging coroutines for async execution, serialization for structured output, and type safety throughout.
+
+This guide walks through three progressively more capable agent patterns, extracted from the tutorial in the `tutorials/kotlin-agent-with-koog` directory.
+
+<Info>
+This guide targets JVM and Android developers who already know Kotlin basics and Gradle. If you are coming from Python, the inline comments in each code sample call out the Kotlin-specific patterns (coroutines, Elvis operator, `use` blocks) alongside their Python equivalents.
+</Info>
+
+<CardGroup cols={3}>
+  <Card title="Kotlin-native" icon="coffee">
+    Coroutines, type safety, and Gradle — no Python runtime or virtual environment required.
+  </Card>
+  <Card title="Annotation-based tools" icon="tag">
+    Expose functions to the LLM with `@Tool` and `@LLMDescription` — no schema boilerplate.
+  </Card>
+  <Card title="Typed responses" icon="code">
+    Get Kotlin data classes back from the LLM instead of strings that need parsing.
+  </Card>
+</CardGroup>
+
+## Prerequisites
+
+Before running any code you need:
+
+- **JDK 17 or later.** Check with `java -version`. To install:
+  - macOS: `brew install openjdk@17`
+  - Ubuntu/Debian: `sudo apt install openjdk-17-jdk`
+  - Any platform: download from [Adoptium](https://adoptium.net)
+- **An OpenAI API key** with billing enabled.
+
+Set the key as an environment variable:
+
+```bash
+export OPENAI_API_KEY="sk-..."
+```
+
+## Project setup
+
+Clone the repository and navigate to the tutorial directory:
+
+```bash
+git clone https://github.com/NirDiamant/agents-towards-production.git
+cd agents-towards-production/tutorials/kotlin-agent-with-koog
+```
+
+The Gradle wrapper is included — you do not need to install Gradle separately. Use the interactive runner for a guided walkthrough:
+
+```bash
+./run.sh
+```
+
+Or run each step directly:
+
+```bash
+./gradlew step1   # Basic agent
+./gradlew step2   # Agent with tools
+./gradlew step3   # Structured output
+```
+
+### Gradle dependencies
+
+The `build.gradle.kts` file declares everything the tutorial needs:
+
+```kotlin
+plugins {
+    kotlin("jvm") version "2.1.0"
+    kotlin("plugin.serialization") version "2.1.0"
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // Koog AI agent framework by JetBrains
+    implementation("ai.koog:koog-agents:0.6.2")
+
+    // Kotlin coroutines (required for suspend-based agent execution)
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.10.1")
+
+    // Kotlin serialization (required for structured output and tool definitions)
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.8.0")
+
+    // SLF4J no-op logger to suppress logging noise in tutorial output
+    implementation("org.slf4j:slf4j-nop:2.0.16")
+}
+
+sourceSets {
+    main {
+        kotlin {
+            // Look for .kt files at the project root rather than src/main/kotlin
+            setSrcDirs(listOf("."))
+        }
+    }
+}
+
+kotlin {
+    jvmToolchain(17)
+}
+```
+
+Verify the project compiles before proceeding:
+
+```bash
+./gradlew build
+```
+
+The first build downloads Gradle and all dependencies — this takes about a minute and only happens once.
+
+## Step 1: Your first agent
+
+A minimal Koog agent needs three things: an executor (the HTTP client that reaches the LLM), a model, and a system prompt. The `run()` call sends your prompt and returns the model's text response.
+
+```kotlin
+// Step1_HelloAgent.kt
+
+import ai.koog.agents.core.agent.AIAgent
+import ai.koog.prompt.executor.clients.openai.OpenAIModels
+import ai.koog.prompt.executor.llms.all.simpleOpenAIExecutor
+
+// "suspend fun main()" is Kotlin's async entry point.
+// In Python terms: async def main()
+// Koog agents use coroutines, so main() must be suspendable.
+suspend fun main() {
+
+    // The "?:" operator (Elvis) provides a fallback if the value is null.
+    // In Python terms: api_key = os.environ.get("OPENAI_API_KEY") or raise ...
+    val apiKey = System.getenv("OPENAI_API_KEY")
+        ?: error("Set the OPENAI_API_KEY environment variable before running this example.")
+
+    // ".use { ... }" automatically closes the HTTP connection when the block finishes.
+    // In Python terms: with open(...) as f:
+    simpleOpenAIExecutor(apiKey).use { executor ->
+
+        val agent = AIAgent(
+            promptExecutor = executor,
+            llmModel = OpenAIModels.Chat.GPT4oMini,
+            systemPrompt = "You are a concise assistant. Answer in one or two sentences.",
+        )
+
+        val response = agent.run("What makes Kotlin a good language for backend development?")
+        println("Agent response: $response")
+    }
+}
+```
+
+Run it:
+
+```bash
+./gradlew step1
+```
+
+## Step 2: Adding tools
+
+A basic agent is limited to the knowledge baked into the LLM. Tools let the agent query real systems, perform calculations, or look up data at runtime.
+
+Koog uses an annotation-based API. You create a class that implements `ToolSet`, mark each callable method with `@Tool`, and add `@LLMDescription` to every function and parameter so the model knows when and how to invoke them. This follows the ReAct pattern: the LLM reasons about the task, calls a tool, observes the result, and repeats until it has enough information to respond.
+
+### Define the tools
+
+```kotlin
+// Step2_AgentWithTools.kt (tool definitions)
+
+import ai.koog.agents.core.tools.annotations.LLMDescription
+import ai.koog.agents.core.tools.annotations.Tool
+import ai.koog.agents.core.tools.reflect.ToolSet
+
+@LLMDescription("Tools for looking up weather, performing calculations, and retrieving facts")
+class AssistantTools : ToolSet {
+
+    @Tool
+    @LLMDescription("Get the current weather for a given city. Returns temperature and conditions.")
+    fun getWeather(@LLMDescription("City name, e.g. 'Tokyo'") city: String): String {
+        // In a real app this would call a weather API.
+        // Hardcoded data keeps the tutorial self-contained.
+        val data = mapOf(
+            "tokyo"    to "22C, partly cloudy",
+            "london"   to "14C, rainy",
+            "new york" to "28C, sunny",
+            "sydney"   to "18C, clear skies",
+        )
+        return data[city.lowercase()] ?: "25C, clear (default forecast)"
+    }
+
+    @Tool
+    @LLMDescription("Evaluate a basic arithmetic expression and return the numeric result.")
+    fun calculate(
+        @LLMDescription("Arithmetic expression, e.g. '144 / 12'") expression: String
+    ): String {
+        val result = evaluateExpression(expression)
+        return "$expression = $result"
+    }
+
+    @Tool
+    @LLMDescription("Look up a factual piece of information about a topic.")
+    fun lookupFact(
+        @LLMDescription("Topic to look up, e.g. 'Kotlin'") topic: String
+    ): String {
+        val facts = mapOf(
+            "kotlin" to "Kotlin was created by JetBrains and first released in 2011. " +
+                        "It became an official Android language in 2017.",
+            "koog"   to "Koog is an open-source AI agent framework by JetBrains for " +
+                        "building LLM-powered agents in Kotlin.",
+        )
+        return facts[topic.lowercase()] ?: "No specific fact found for '$topic'."
+    }
+
+    private fun evaluateExpression(expr: String): Double {
+        val s = expr.replace(" ", "")
+        return when {
+            "+" in s.drop(1) -> {
+                val i = s.indexOfLast { it == '+' }
+                evaluateExpression(s.substring(0, i)) + evaluateExpression(s.substring(i + 1))
+            }
+            "-" in s.drop(1) -> {
+                val i = s.indexOfLast { it == '-' }
+                evaluateExpression(s.substring(0, i)) - evaluateExpression(s.substring(i + 1))
+            }
+            "*" in s -> {
+                val i = s.indexOfFirst { it == '*' }
+                evaluateExpression(s.substring(0, i)) * evaluateExpression(s.substring(i + 1))
+            }
+            "/" in s -> {
+                val i = s.indexOfFirst { it == '/' }
+                evaluateExpression(s.substring(0, i)) / evaluateExpression(s.substring(i + 1))
+            }
+            else -> s.toDouble()
+        }
+    }
+}
+```
+
+### Register the tools and run the agent
+
+```kotlin
+// Step2_AgentWithTools.kt (agent setup)
+
+import ai.koog.agents.core.agent.AIAgent
+import ai.koog.agents.core.tools.ToolRegistry
+import ai.koog.agents.core.tools.reflect.asTools
+import ai.koog.prompt.executor.clients.openai.OpenAIModels
+import ai.koog.prompt.executor.llms.all.simpleOpenAIExecutor
+
+suspend fun main() {
+    val apiKey = System.getenv("OPENAI_API_KEY")
+        ?: error("Set the OPENAI_API_KEY environment variable before running this example.")
+
+    // .asTools() converts the annotated ToolSet class into Koog's internal format.
+    val toolRegistry = ToolRegistry {
+        tools(AssistantTools().asTools())
+    }
+
+    simpleOpenAIExecutor(apiKey).use { executor ->
+        val agent = AIAgent(
+            promptExecutor = executor,
+            llmModel = OpenAIModels.Chat.GPT4oMini,
+            systemPrompt = """
+                You are a helpful assistant with access to tools for weather, calculations, and fact lookup.
+                When asked a question, use the appropriate tools to find the answer.
+                Always use tools when they are relevant rather than guessing.
+            """.trimIndent(),
+            toolRegistry = toolRegistry,
+        )
+
+        // This single question forces the agent to use all three tools.
+        val question = "What is the weather in Tokyo, and what is 144 divided by 12? " +
+                       "Also, tell me an interesting fact about Kotlin."
+        println("Question: $question\n")
+
+        // The agent decides which tools to call, what arguments to pass,
+        // and how to compose the final answer — all automatically.
+        val response = agent.run(question)
+        println("Agent response: $response")
+    }
+}
+```
+
+Run it:
+
+```bash
+./gradlew step2
+```
+
+<Tip>
+To add a new tool, define a new method on `AssistantTools` with `@Tool` and `@LLMDescription`, then re-run. The agent discovers it automatically without any other code changes.
+</Tip>
+
+## Step 3: Structured output
+
+Free-text responses work for conversational interfaces, but production pipelines often need data they can parse directly — to populate a database, trigger downstream actions, or feed into a dashboard. Koog lets you define a Kotlin data class as the response schema and get back a fully deserialized object instead of a string.
+
+### Define the response schema
+
+Use `@Serializable` from `kotlinx.serialization` for JSON conversion and `@LLMDescription` so the model knows what to fill into each field. On data class constructor parameters, use the `@property:LLMDescription` use-site target — this is a Kotlin-specific detail required for Koog's reflection-based schema generation:
+
+```kotlin
+// Step3_StructuredOutput.kt (data class)
+
+import ai.koog.agents.core.tools.annotations.LLMDescription
+import kotlinx.serialization.SerialName
+import kotlinx.serialization.Serializable
+
+@Serializable
+@SerialName("CityAnalysis")
+@LLMDescription("An analysis of a city covering key facts and livability")
+data class CityAnalysis(
+    @property:LLMDescription("Name of the city")
+    val city: String,
+
+    @property:LLMDescription("Country where the city is located")
+    val country: String,
+
+    @property:LLMDescription("Approximate population in millions")
+    val populationMillions: Double,
+
+    @property:LLMDescription("The city's primary language")
+    val primaryLanguage: String,
+
+    @property:LLMDescription("Three notable landmarks or attractions")
+    val landmarks: List<String>,
+
+    @property:LLMDescription("A short summary of the city's character in one or two sentences")
+    val summary: String,
+)
+```
+
+### Configure the structured output strategy
+
+Pass `structuredOutputWithToolsStrategy<CityAnalysis>()` as the agent's strategy. Koog sends the data class schema to the model, allows tool calls in a loop if needed, and returns a deserialized `CityAnalysis` object when done:
+
+```kotlin
+// Step3_StructuredOutput.kt (agent setup)
+
+import ai.koog.agents.core.agent.AIAgent
+import ai.koog.agents.core.agent.config.AIAgentConfig
+import ai.koog.agents.ext.agent.structuredOutputWithToolsStrategy
+import ai.koog.prompt.dsl.prompt
+import ai.koog.prompt.executor.clients.openai.OpenAIModels
+import ai.koog.prompt.executor.llms.all.simpleOpenAIExecutor
+
+suspend fun main() {
+    val apiKey = System.getenv("OPENAI_API_KEY")
+        ?: error("Set the OPENAI_API_KEY environment variable before running this example.")
+
+    val agentConfig = AIAgentConfig(
+        prompt = prompt("city-analyst") {
+            system("You are a knowledgeable city analyst. When asked about a city, provide accurate structured data.")
+        },
+        model = OpenAIModels.Chat.GPT4o,
+        maxAgentIterations = 5,
+    )
+
+    simpleOpenAIExecutor(apiKey).use { executor ->
+        val agent = AIAgent(
+            promptExecutor = executor,
+            strategy = structuredOutputWithToolsStrategy<CityAnalysis>(),
+            agentConfig = agentConfig,
+        )
+
+        // The return type is CityAnalysis — a real Kotlin object, not a string.
+        // No JSON parsing, no regex, no error-prone string splitting.
+        val analysis: CityAnalysis = agent.run("Tell me about Tokyo")
+
+        // Access typed fields directly
+        println("City: ${analysis.city}")
+        println("Country: ${analysis.country}")
+        println("Population: ${analysis.populationMillions}M")
+        println("Language: ${analysis.primaryLanguage}")
+        println("Landmarks: ${analysis.landmarks.joinToString(", ")}")
+        println("Summary: ${analysis.summary}")
+    }
+}
+```
+
+Run it:
+
+```bash
+./gradlew step3
+```
+
+Every value in the output is a typed Kotlin field. `analysis.populationMillions` is a `Double` you can do arithmetic with. `analysis.landmarks` is a `List<String>` you can iterate over. The framework handles the entire serialization round-trip.
+
+## Tutorial steps summary
+
+<CardGroup cols={3}>
+  <Card title="Step 1: Basic agent" icon="1">
+    Send a prompt and receive a text response. Covers `AIAgent`, `simpleOpenAIExecutor`, and coroutine entry points.
+  </Card>
+  <Card title="Step 2: Tool calling" icon="2">
+    Register custom tools with `@Tool` and `ToolRegistry`. The agent uses the ReAct loop to call tools and compose answers.
+  </Card>
+  <Card title="Step 3: Structured output" icon="3">
+    Define a `@Serializable` data class and use `structuredOutputWithToolsStrategy` to get typed objects back from the LLM.
+  </Card>
+</CardGroup>
+
+<Warning>
+Koog agents run on Kotlin coroutines. Your `main()` function must be declared as `suspend fun main()` — a regular `fun main()` will not compile with Koog's `agent.run()` calls.
+</Warning>
+
+## Next steps
+
+<AccordionGroup>
+  <Accordion title="Swap the LLM model">
+    Change `OpenAIModels.Chat.GPT4oMini` to `OpenAIModels.Chat.GPT4o` or any other model constant from the `OpenAIModels` object. For Step 3, GPT-4o is recommended because structured output with function calling benefits from the more capable model.
+  </Accordion>
+  <Accordion title="Add a real API tool">
+    Replace the hardcoded weather data in `AssistantTools.getWeather` with an actual HTTP call using `ktor-client` or `OkHttp`. The annotation pattern and tool registry stay exactly the same — only the function body changes.
+  </Accordion>
+  <Accordion title="Define your own structured output schema">
+    Change `CityAnalysis` to a schema that fits your use case — a `BookReview`, `BugReport`, or `RecipeCard`. Update the system prompt to match, then re-run `./gradlew step3`. The same framework code handles any `@Serializable` data class.
+  </Accordion>
+</AccordionGroup>

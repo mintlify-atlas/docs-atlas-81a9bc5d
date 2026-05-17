@@ -1,0 +1,236 @@
+---
+title: "Automated agent evaluation using IntellAgent framework"
+description: "Use IntellAgent's three-stage pipeline to generate test scenarios, simulate user interactions, and analyze agent behavior against defined policies."
+---
+
+Testing an agent manually against a handful of hand-crafted examples misses the edge cases that matter most. IntellAgent solves this by automatically generating diverse scenarios from your agent's own policy document, simulating realistic multi-turn conversations, and producing a detailed behavioral report — all without writing a single test case by hand.
+
+## How IntellAgent works
+
+IntellAgent runs a three-stage pipeline against your agent:
+
+<CardGroup cols={3}>
+  <Card title="Stage 1: Scenario generation" icon="wand-magic-sparkles">
+    Reads your agent's system prompt and automatically creates realistic, policy-challenging test scenarios — including edge cases you might not anticipate.
+  </Card>
+  <Card title="Stage 2: Dynamic simulation" icon="messages">
+    Simulates multi-turn conversations between a virtual user and your agent, adapting interaction patterns based on how the agent responds.
+  </Card>
+  <Card title="Stage 3: Fine-grained analysis" icon="chart-line">
+    Identifies policy violations, performance gaps, and provides actionable recommendations — all accessible through an interactive Streamlit dashboard.
+  </Card>
+</CardGroup>
+
+## Setup
+
+### Install IntellAgent
+
+```bash
+git clone https://github.com/plurai-ai/intellagent.git
+cd intellagent
+pip install -r requirements.txt && pip install nest_asyncio
+```
+
+### Configure LLM credentials
+
+IntellAgent supports all major LLM providers through LangChain. Create a YAML config file with your credentials:
+
+```python
+import os
+import yaml
+
+OPENAI_API_KEY = "your-api-key-here"  # Replace with your actual API key
+
+llm_config = {
+    "openai": {
+        "OPENAI_API_KEY": OPENAI_API_KEY
+    }
+}
+
+os.makedirs("config", exist_ok=True)
+
+with open("config/llm_env.yml", "w") as f:
+    yaml.dump(llm_config, f)
+
+print("LLM API credentials configured successfully.")
+```
+
+<Note>
+IntellAgent supports OpenAI, Anthropic, Azure, Google, Bedrock, and NVIDIA providers. Add multiple providers to the same `llm_env.yml` file.
+</Note>
+
+## Define your agent
+
+IntellAgent evaluates your agent against the policies you write in its system prompt. The more explicit your policies, the more targeted the generated test scenarios will be.
+
+```python
+os.makedirs("examples/my_education_agent/input", exist_ok=True)
+
+education_prompt = """
+# Educational Assistant Guidelines
+
+You are an educational assistant designed to help students with their learning needs.
+
+## Core Responsibilities:
+- Provide clear, accurate information on educational topics
+- Explain complex concepts in simple terms
+- Help with homework questions by guiding the student through the solution process
+- Recommend learning resources when appropriate
+
+## Policies:
+1. **Do not solve problems directly** - Instead, provide guidance and hints
+2. **Use age-appropriate language** - Adjust explanations based on the student's level
+3. **Encourage critical thinking** - Ask follow-up questions that promote deeper understanding
+4. **Be patient and supportive** - Create a positive learning environment
+5. **Verify understanding** - Check if the student has understood the explanation
+
+## Subject Areas:
+- Mathematics (Basic arithmetic to advanced calculus)
+- Science (Physics, Chemistry, Biology)
+- Language Arts (Grammar, Writing, Literature)
+- Social Studies (History, Geography, Civics)
+"""
+
+with open("examples/my_education_agent/input/wiki.md", "w") as f:
+    f.write(education_prompt)
+```
+
+<Tip>
+Name your policies explicitly (for example, "Policy 1: Do not solve problems directly"). IntellAgent uses these labels in its violation reports so you can trace failures back to specific policy statements.
+</Tip>
+
+## Configure the simulation
+
+The configuration file controls which models run the evaluation framework versus which model plays the role of your agent. You can mix and match providers.
+
+```python
+config = {
+    "environment": {
+        "prompt_path": "examples/my_education_agent/input/wiki.md",
+    },
+    "llm_intellagent": {
+        "type": "openai",   # Model driving IntellAgent's evaluation logic
+        "name": "gpt-4o"
+    },
+    "llm_chat": {
+        "type": "openai",   # Model acting as your agent under test
+        "name": "gpt-4o-mini"
+    },
+    "dataset": {
+        "num_samples": 10   # Number of test scenarios to generate
+    }
+}
+
+with open("config/my_education_config.yml", "w") as f:
+    yaml.dump(config, f, default_flow_style=False)
+
+print(f"Will generate {config['dataset']['num_samples']} test scenarios")
+```
+
+## Run the evaluation
+
+<Steps>
+  <Step title="Initialize the simulator">
+    ```python
+    import nest_asyncio
+    import warnings
+    warnings.filterwarnings(
+        "ignore",
+        message="API key must be provided when using hosted LangSmith API"
+    )
+    nest_asyncio.apply()
+
+    from simulator.utils.file_reading import override_config
+    from simulator.simulator_executor import SimulatorExecutor
+
+    base_output_path = './results/education'
+    config = override_config('config/my_education_config.yml')
+    executor = SimulatorExecutor(config, base_output_path)
+
+    print(f"Results will be saved to: {base_output_path}")
+    ```
+  </Step>
+  <Step title="Generate the synthetic dataset">
+    ```python
+    executor.load_dataset('data_1')
+
+    print("Scenario dataset generated")
+    print(f"Example scenario:\n{executor.dataset_handler.records[0].description.event_description}")
+    ```
+  </Step>
+  <Step title="Run the simulation">
+    ```python
+    print("Starting simulation...")
+    print("Estimated time: 2-5 minutes for 10 scenarios")
+
+    executor.run_simulation('exp_1')
+
+    print("Simulation completed — results ready for analysis")
+    ```
+  </Step>
+  <Step title="Launch the results dashboard">
+    ```python
+    import subprocess
+    import threading
+    import time
+    from IPython.display import IFrame
+
+    def run_streamlit():
+        subprocess.run([
+            "streamlit", "run", "simulator/visualization/Simulator_Visualizer.py"
+        ], cwd=".")
+
+    streamlit_thread = threading.Thread(target=run_streamlit)
+    streamlit_thread.daemon = True
+    streamlit_thread.start()
+
+    time.sleep(5)
+
+    try:
+        display(IFrame(src="http://localhost:8501", width=1000, height=600))
+    except:
+        print("Dashboard running at: http://localhost:8501")
+        print("Navigate to the 'Session Visualizer' page to explore conversation traces")
+    ```
+  </Step>
+</Steps>
+
+## Interpret results
+
+The dashboard shows four views:
+
+<Tabs>
+  <Tab title="Conversation traces">
+    Step through each simulated conversation turn by turn. See the exact messages the virtual user sent and how your agent responded.
+  </Tab>
+  <Tab title="Policy violations">
+    A breakdown of which policies were violated and how often. Each violation links back to the specific conversation where it occurred.
+  </Tab>
+  <Tab title="Performance metrics">
+    Success rates grouped by policy type and scenario category. Use this to prioritize which policies to reinforce first.
+  </Tab>
+  <Tab title="Critique detail">
+    An LLM-generated explanation of what went wrong in each failing conversation and what a correct response would look like.
+  </Tab>
+</Tabs>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Test more complex agents" icon="wrench">
+    Try IntellAgent against agents that use databases and tools — see the [airline example](https://intellagent-doc.plurai.ai/examples/airline/) in the IntellAgent docs.
+  </Card>
+  <Card title="Customize evaluation criteria" icon="sliders">
+    Define domain-specific success metrics and real-world data integration. See the [customization guide](https://intellagent-doc.plurai.ai/customization/custom_chatbot/).
+  </Card>
+  <Card title="Scale up scenarios" icon="arrow-up-right-dots">
+    Increase `num_samples` to 50–100 for production readiness validation. More scenarios surface rarer edge cases.
+  </Card>
+  <Card title="Iterate on the prompt" icon="rotate">
+    Use violation reports to refine your agent's system prompt, then re-run evaluation to measure the improvement.
+  </Card>
+</CardGroup>
+
+<Warning>
+IntellAgent uses LLM calls to generate scenarios and simulate users. Running 10 scenarios against GPT-4o typically costs under $0.50, but costs scale with `num_samples` and model choice.
+</Warning>

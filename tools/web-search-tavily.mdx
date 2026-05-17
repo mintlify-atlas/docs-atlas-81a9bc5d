@@ -1,0 +1,389 @@
+---
+title: "Real-time web search and crawling for agents with Tavily"
+description: "Integrate Tavily Search, Extract, and Crawl into a LangGraph ReAct agent for live web research, and combine web results with a private knowledge base."
+---
+
+Language models have a training cutoff. When your agent needs current prices, recent news, or the contents of a specific URL, it has to reach out to the live web. Tavily provides three complementary APIs—search, extract, and crawl—purpose-built for agents. This tutorial shows you how to configure each tool with the LangChain integration, build a ReAct research agent, and extend it into a hybrid agent that blends public web data with your own internal documents.
+
+<CardGroup cols={3}>
+  <Card title="Search" icon="magnifying-glass">
+    Semantically ranked results with title, URL, and content snippets—up to 10 per call.
+  </Card>
+  <Card title="Extract" icon="file-lines">
+    Full page content from up to 20 URLs at once, including advanced mode for dynamic content.
+  </Card>
+  <Card title="Crawl" icon="spider-web">
+    Explore a website's link graph and gather content from linked pages in a single call.
+  </Card>
+</CardGroup>
+
+## Prerequisites
+
+```bash
+pip install -U tavily-python langchain-openai langchain langchain-tavily langgraph
+```
+
+Set your API keys:
+
+```python
+import os
+import getpass
+from dotenv import load_dotenv
+
+load_dotenv()
+
+if not os.environ.get("TAVILY_API_KEY"):
+    os.environ["TAVILY_API_KEY"] = getpass.getpass("TAVILY_API_KEY:\n")
+
+if not os.environ.get("OPENAI_API_KEY"):
+    os.environ["OPENAI_API_KEY"] = getpass.getpass("OPENAI_API_KEY:\n")
+```
+
+## Explore the Tavily API directly
+
+Before building an agent, run the three endpoints manually to understand what each one returns.
+
+<Tabs>
+  <Tab title="Search">
+    ```python
+    from tavily import TavilyClient
+
+    tavily_client = TavilyClient(api_key=os.getenv("TAVILY_API_KEY"))
+
+    # Basic search — 5 results
+    results = tavily_client.search(
+        query="What happened in NYC today?",
+        max_results=5,
+    )
+
+    for r in results["results"]:
+        print(r["title"])
+        print(r["url"])
+        print(r["content"])
+        print(r["score"])
+        print()
+    ```
+
+    Each result has a semantic relevance `score`. Use it to decide which URLs are worth extracting in full.
+  </Tab>
+  <Tab title="Search with filters">
+    ```python
+    # Filter by time range, domain, and topic
+    results = tavily_client.search(
+        query="Anthropic model release?",
+        max_results=5,
+        time_range="month",
+        include_domains=["techcrunch.com"],
+        topic="news",
+    )
+
+    for r in results["results"]:
+        print(r["title"])
+        print(r["url"])
+        print(r["content"])
+        print()
+    ```
+
+    `topic="news"` focuses results on trusted third-party news sources. All results will be from `techcrunch.com` and dated within the last month.
+  </Tab>
+  <Tab title="Extract">
+    ```python
+    # Extract full page content from the URLs returned by search
+    extract_results = tavily_client.extract(
+        urls=[r["url"] for r in results["results"]],
+        # extract_depth="advanced",  # uncomment for dynamic pages, tables, and embedded media
+    )
+
+    for r in extract_results["results"]:
+        print(r["url"])
+        print(r["raw_content"])
+        print()
+    ```
+
+    The extract endpoint accepts up to 20 URLs per call. `raw_content` contains the full text—much more detail than the search snippet.
+  </Tab>
+</Tabs>
+
+<Note>
+`raw_content` from the extract endpoint can be large. Keep your model's context window in mind when passing extracted content directly to an LLM.
+</Note>
+
+## Define the LangChain tool wrappers
+
+The `langchain_tavily` package exposes the three endpoints as LangChain tools with configurable defaults. The agent overrides these defaults at runtime based on the query context.
+
+```python
+from langchain_tavily import TavilySearch, TavilyExtract, TavilyCrawl
+
+# Search — up to 10 results, general topic
+search = TavilySearch(max_results=10, topic="general")
+
+# Extract — advanced depth for complex pages
+extract = TavilyExtract(extract_depth="advanced")
+
+# Crawl — explore a site's link graph
+crawl = TavilyCrawl()
+```
+
+Set up your language models:
+
+```python
+from langchain_openai import ChatOpenAI
+
+o3_mini = ChatOpenAI(model="o3-mini-2025-01-31", api_key=os.getenv("OPENAI_API_KEY"))
+gpt_4_1 = ChatOpenAI(model="gpt-4.1", api_key=os.getenv("OPENAI_API_KEY"))
+```
+
+## Build the web research agent
+
+The agent is a LangGraph ReAct graph. The system prompt explains when to use each tool and how to cite sources.
+
+```python
+import datetime
+from langgraph.prebuilt import create_react_agent
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+
+today = datetime.datetime.today().strftime("%A, %B %d, %Y")
+
+web_agent = create_react_agent(
+    model=gpt_4_1,
+    tools=[search, extract, crawl],
+    prompt=ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                f"""
+You are a research agent equipped with advanced web tools: Tavily Web Search,
+Web Crawl, and Web Extract. Your mission is to conduct comprehensive, accurate,
+and up-to-date research, grounding your findings in credible web sources.
+
+**Today's Date:** {today}
+
+**Available Tools:**
+
+1. **Tavily Web Search**
+   - Retrieve relevant web pages based on a query.
+   - Use parameters such as `search_depth`, `time_range`, `include_domains`,
+     and `include_raw_content`.
+   - Break complex queries into focused sub-queries.
+
+2. **Tavily Web Crawl**
+   - Explore a website's link graph and gather content from linked pages.
+   - Specify `max_depth`, `max_breadth`, and `extract_depth`.
+   - Use `select_paths` or `exclude_paths` to focus the crawl.
+
+3. **Tavily Web Extract**
+   - Extract full content from specific URLs.
+   - Set `extract_depth` to "advanced" for tables and embedded media.
+
+**Research methodology:**
+- Thought → Action → Observation, repeated as needed.
+- Always cite source URLs inline.
+- Never fabricate information.
+- Present the final answer in markdown with citations.
+""",
+            ),
+            MessagesPlaceholder(variable_name="messages"),
+        ]
+    ),
+    name="web_agent",
+)
+```
+
+### Run example queries
+
+<CodeGroup>
+
+```python find iphone models and prices
+from langchain_core.messages import HumanMessage
+
+inputs = {
+    "messages": [
+        HumanMessage(
+            content="find all the iphone models currently available on apple.com and their prices"
+        )
+    ]
+}
+
+for s in web_agent.stream(inputs, stream_mode="values"):
+    message = s["messages"][-1]
+    if isinstance(message, tuple):
+        print(message)
+    else:
+        message.pretty_print()
+```
+
+```python find software engineer job postings
+inputs = {
+    "messages": [
+        HumanMessage(
+            content="return 5 job postings for a software engineer in the bay area on linkedin"
+        )
+    ]
+}
+
+for s in web_agent.stream(inputs, stream_mode="values"):
+    message = s["messages"][-1]
+    if isinstance(message, tuple):
+        print(message)
+    else:
+        message.pretty_print()
+```
+
+</CodeGroup>
+
+Watch the intermediate steps in the streamed output to see how the agent decides between search, extract, and crawl for each query.
+
+## Tool selection patterns
+
+The agent adapts its tool strategy to the query type. Here are the three main patterns:
+
+<Tabs>
+  <Tab title="Search only">
+    **Use when:** you need a quick overview from multiple sources.
+
+    **Example:** "What are recent AI news headlines?"
+
+    The agent calls `TavilySearch` with `time_range="week"` and synthesizes the snippets into a summary with source links.
+  </Tab>
+  <Tab title="Search then extract">
+    **Use when:** a search result looks highly relevant but the snippet is too short.
+
+    **Example:** "Provide detailed insights into quantum computing advancements."
+
+    1. `TavilySearch` finds 10 relevant articles.
+    2. `TavilyExtract` retrieves the full text of the top result.
+    3. The agent synthesizes the detailed content with citations.
+  </Tab>
+  <Tab title="Search then crawl">
+    **Use when:** you need deep coverage of a single authoritative source.
+
+    **Example:** "What are the latest renewable energy technologies?"
+
+    1. `TavilySearch` identifies a leading industry site.
+    2. `TavilyCrawl` with `max_depth=2` explores that site's linked pages.
+    3. The agent synthesizes findings from across the crawled pages.
+  </Tab>
+</Tabs>
+
+## Build a hybrid agent: web + private knowledge
+
+For enterprise use cases, combine Tavily's live web access with a private vector store. This lets the agent compare public information against your internal CRM data, meeting notes, or documentation.
+
+### Set up the vector store
+
+```python
+from langchain_chroma import Chroma
+from langchain_openai import OpenAIEmbeddings
+
+embeddings = OpenAIEmbeddings()
+
+vector_store = Chroma(
+    collection_name="crm",
+    embedding_function=embeddings,
+    persist_directory="supplemental/db",
+)
+
+retriever = vector_store.as_retriever()
+```
+
+Test the retriever independently:
+
+```python
+results = retriever.invoke("robotics use case")
+for doc in results:
+    print(doc.page_content)
+    print()
+```
+
+### Expose the retriever as a tool
+
+```python
+vector_search_tool = retriever.as_tool(
+    name="vector_search",
+    description="Perform a vector search on our company's CRM data.",
+)
+```
+
+### Build the hybrid agent
+
+Pass all four tools—search, crawl, extract, and vector search—to the same ReAct agent.
+
+```python
+hybrid_agent = create_react_agent(
+    model=gpt_4_1,
+    tools=[search, crawl, extract, vector_search_tool],
+    prompt=ChatPromptTemplate.from_messages(
+        [
+            (
+                "system",
+                f"""
+You are a ReAct-style research agent with access to:
+- Tavily Web Search, Tavily Web Extract, Tavily Web Crawl (public web)
+- Internal Vector Search (proprietary CRM data: Meta, Apple, Google, Amazon,
+  Microsoft, Tesla accounts)
+
+**Today's Date:** {today}
+
+All answers must be grounded in retrieved information. You may not use prior
+knowledge or fabricate data. If tools return nothing useful, say so.
+
+When a question involves a company, check both the public web and the CRM
+vector store. Cite source URLs for web content; note the internal source for
+CRM data.
+
+Workflow: Thought → Action → Observation. Repeat as needed. Respond only after
+gathering all required information.
+""",
+            ),
+            MessagesPlaceholder(variable_name="messages"),
+        ]
+    ),
+    name="hybrid_agent",
+)
+```
+
+### Run a hybrid query
+
+```python
+inputs = {
+    "messages": [
+        HumanMessage(
+            content=(
+                "Search for the latest news on Google relevant to our "
+                "current CRM data on them"
+            )
+        )
+    ]
+}
+
+for s in hybrid_agent.stream(inputs, stream_mode="values"):
+    message = s["messages"][-1]
+    if isinstance(message, tuple):
+        print(message)
+    else:
+        message.pretty_print()
+```
+
+The agent runs `TavilySearch` to find recent Google news, then `vector_search` to retrieve your CRM notes on Google, and synthesizes both into a single report.
+
+<Tip>
+The vector database included in the tutorial uses synthetic CRM data to demonstrate the pattern. Replace `persist_directory` and `collection_name` with your own Chroma database, or swap Chroma for any LangChain-compatible vector store.
+</Tip>
+
+## Monitoring and research workflows
+
+<CardGroup cols={2}>
+  <Card title="Competitive intelligence" icon="chart-bar">
+    Combine `time_range="week"` on web search with CRM data to track competitor activity against your current accounts.
+  </Card>
+  <Card title="Trend monitoring" icon="arrow-trend-up">
+    Schedule the agent on a cron job. Pass a fixed query each run and diff the results to surface emerging trends.
+  </Card>
+  <Card title="Deep-dive research" icon="microscope">
+    Use search to discover relevant sites, then crawl each one at `max_depth=2` for comprehensive coverage of a topic.
+  </Card>
+  <Card title="Document enrichment" icon="file-plus">
+    Run `TavilyExtract` on URLs found in your CRM records to pull the latest public information about a company.
+  </Card>
+</CardGroup>

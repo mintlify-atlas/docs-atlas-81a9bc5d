@@ -1,81 +1,235 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
-icon: 'rocket'
+title: "Quickstart: run your first agent tutorial"
+description: "Clone the repo, install dependencies, and run the LangGraph text analysis pipeline in under ten minutes. No prior setup required beyond Python and pip."
 ---
 
-## Get started in three steps
+This guide walks you through cloning the repository and running the LangGraph stateful workflow tutorial — a three-step text analysis pipeline that classifies, extracts entities from, and summarizes any text you give it. The same steps apply to every other tutorial in the repo.
 
-Get your documentation site running locally and make your first customization.
+## Prerequisites
 
-### Step 1: Set up your local environment
+<Info>
+  Before you start, make sure you have the following installed:
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+  - **Python 3.9 or higher** — run `python --version` to check
+  - **pip** — comes with Python; run `pip --version` to confirm
+  - **Jupyter** — `pip install notebook` if you do not have it
+  - **git** — run `git --version` to check
+  - An **OpenAI API key** — get one at [platform.openai.com](https://platform.openai.com/signup)
+</Info>
 
-### Step 2: Deploy your changes
+## Run the LangGraph tutorial
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+<Steps>
+  <Step title="Clone the repository">
+    Open a terminal and run:
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+    ```bash
+    git clone https://github.com/NirDiamant/agents-towards-production.git
+    cd agents-towards-production
+    ```
+  </Step>
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+  <Step title="Navigate to the tutorial directory">
+    Each tutorial lives in its own folder under `tutorials/`. For this example, navigate to the LangGraph tutorial:
 
-### Step 3: Go live
+    ```bash
+    cd tutorials/LangGraph-agent
+    ```
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+    You will find the following files:
+
+    ```
+    tutorials/LangGraph-agent/
+    ├── README.md
+    ├── langgraph_tutorial.ipynb
+    └── requirements.txt
+    ```
+  </Step>
+
+  <Step title="Create a virtual environment (recommended)">
+    ```bash
+    python -m venv .venv
+    source .venv/bin/activate   # On Windows: .venv\Scripts\activate
+    ```
+  </Step>
+
+  <Step title="Install dependencies">
+    ```bash
+    pip install -r requirements.txt
+    ```
+
+    If there is no `requirements.txt` in this tutorial, install the packages directly:
+
+    ```bash
+    pip install langgraph langchain langchain-openai python-dotenv
+    ```
+  </Step>
+
+  <Step title="Set your API key">
+    Create a `.env` file in the tutorial directory with your OpenAI API key:
+
+    ```bash
+    echo "OPENAI_API_KEY=your-key-here" > .env
+    ```
+
+    <Warning>
+      Never commit your `.env` file to version control. The repository's `.gitignore` already excludes it.
+    </Warning>
+  </Step>
+
+  <Step title="Launch the notebook">
+    ```bash
+    jupyter notebook langgraph_tutorial.ipynb
+    ```
+
+    Your browser will open. Click **Run All** from the **Cell** menu, or run each cell individually with `Shift+Enter`.
+  </Step>
+</Steps>
+
+## What the LangGraph tutorial does
+
+The notebook builds a three-node stateful pipeline that processes text through sequential stages. Each stage operates as an independent node in a directed graph.
+
+<Tabs>
+  <Tab title="State definition">
+    ```python
+    from typing import TypedDict, List
+    from langgraph.graph import StateGraph, END
+    from langchain_openai import ChatOpenAI
+
+    class State(TypedDict):
+        text: str
+        classification: str
+        entities: List[str]
+        summary: str
+
+    # Use temperature=0 for deterministic outputs
+    llm = ChatOpenAI(model="gpt-4o-mini", temperature=0)
+    ```
+  </Tab>
+  <Tab title="Processing nodes">
+    ```python
+    from langchain_core.prompts import PromptTemplate
+    from langchain_core.messages import HumanMessage
+
+    def classification_node(state: State):
+        prompt = PromptTemplate(
+            input_variables=["text"],
+            template="Classify the following text into one of the categories: "
+                     "News, Blog, Research, or Other.\n\nText:{text}\n\nCategory:"
+        )
+        message = HumanMessage(content=prompt.format(text=state["text"]))
+        classification = llm.invoke([message]).content.strip()
+        return {"classification": classification}
+
+    def entity_extraction_node(state: State):
+        prompt = PromptTemplate(
+            input_variables=["text"],
+            template="Extract all the entities (Person, Organization, Location) "
+                     "from the following text. Provide the result as a "
+                     "comma-separated list.\n\nText:{text}\n\nEntities:"
+        )
+        message = HumanMessage(content=prompt.format(text=state["text"]))
+        entities = llm.invoke([message]).content.strip().split(", ")
+        return {"entities": entities}
+
+    def summarization_node(state: State):
+        prompt = PromptTemplate(
+            input_variables=["text"],
+            template="Summarize the following text in one short "
+                     "sentence.\n\nText:{text}\n\nSummary:"
+        )
+        message = HumanMessage(content=prompt.format(text=state["text"]))
+        summary = llm.invoke([message]).content.strip()
+        return {"summary": summary}
+    ```
+  </Tab>
+  <Tab title="Graph assembly">
+    ```python
+    # Build the workflow graph
+    workflow = StateGraph(State)
+
+    workflow.add_node("classification_node", classification_node)
+    workflow.add_node("entity_extraction", entity_extraction_node)
+    workflow.add_node("summarization", summarization_node)
+
+    # Wire the nodes in sequence
+    workflow.set_entry_point("classification_node")
+    workflow.add_edge("classification_node", "entity_extraction")
+    workflow.add_edge("entity_extraction", "summarization")
+    workflow.add_edge("summarization", END)
+
+    app = workflow.compile()
+    ```
+  </Tab>
+  <Tab title="Running the pipeline">
+    ```python
+    sample_text = """
+    OpenAI has announced the GPT-4 model, which is a large multimodal model
+    that exhibits human-level performance on various professional benchmarks.
+    It is developed to improve the alignment and safety of AI systems.
+    Additionally, the model is designed to be more efficient and scalable
+    than its predecessor, GPT-3.
+    """
+
+    result = app.invoke({"text": sample_text})
+
+    print("Classification:", result["classification"])
+    print("\nEntities:",     result["entities"])
+    print("\nSummary:",      result["summary"])
+    ```
+
+    Expected output:
+
+    ```text
+    Classification: News
+
+    Entities: ['OpenAI', 'GPT-4', 'GPT-3']
+
+    Summary: OpenAI's upcoming GPT-4 model is a multimodal AI that aims for
+    human-level performance and improved safety, efficiency, and scalability
+    compared to GPT-3.
+    ```
+  </Tab>
+</Tabs>
+
+## Running a different tutorial
+
+The same steps apply to every tutorial in the repository. Navigate to the tutorial directory, install its `requirements.txt`, and run its notebook or `app.py`.
+
+<CodeGroup>
+
+```bash Memory tutorial (Redis)
+cd tutorials/agent-memory-with-redis
+pip install -r requirements.txt
+jupyter notebook *.ipynb
+```
+
+```bash Deployment tutorial (Docker)
+cd tutorials/docker-intro
+pip install -r requirements.txt
+# Follow README.md — this one uses Docker rather than a notebook
+```
+
+```bash Tracing tutorial (LangSmith)
+cd tutorials/tracing-with-langsmith
+pip install -r requirements.txt
+jupyter notebook *.ipynb
+```
+
+</CodeGroup>
+
+<Tip>
+  Read the `README.md` inside each tutorial folder first. It explains what the tutorial covers, what credentials you need, and any service-specific setup steps.
+</Tip>
 
 ## Next steps
 
-Now that you have your docs running, explore these key features:
-
 <CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
+  <Card title="Architecture overview" icon="diagram-project" href="/architecture">
+    Understand how the tutorials fit together into a complete production agent stack.
+  </Card>
+  <Card title="All tutorials" icon="book-open" href="/introduction">
+    Browse all 22 tutorials and choose the component you want to tackle next.
+  </Card>
 </CardGroup>
-
-<Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
-</Note>

@@ -1,133 +1,76 @@
 ---
-title: "Introduction"
-description: "Welcome to the new home for your documentation"
-icon: 'star'
+title: "Agents Towards Production: GenAI Agent Tutorials"
+description: "28 code-first tutorials for building production-grade GenAI agents. From LangGraph workflows to Docker deployment, security, and observability."
 ---
 
-## Setting up
+**Agents Towards Production** is an open-source playbook of end-to-end tutorials for building GenAI agents that scale from prototype to enterprise. Each tutorial covers a specific layer of the agent stack — from stateful workflows and vector memory to Docker deployment, security guardrails, GPU scaling, and full observability.
 
-Get your documentation site up and running in minutes.
-
-<Card
-  title="Start here"
-  icon="rocket"
-  href="/quickstart"
-  horizontal
->
-  Follow our three step quickstart guide.
-</Card>
-
-## Make it yours
-
-Design a docs site that looks great and empowers your users.
-
-<Columns cols={2}>
-  <Card
-    title="Edit locally"
-    icon="pen-to-square"
-    href="/development"
-  >
-    Edit your docs locally and preview them in real time.
+<CardGroup cols={2}>
+  <Card title="Introduction" icon="book-open" href="/introduction">
+    Understand what Agents Towards Production covers and how to use the tutorials.
   </Card>
-  <Card
-    title="Customize your site"
-    icon="palette"
-    href="/essentials/settings"
-  >
-    Customize the design and colors of your site to match your brand.
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Clone the repo, pick a tutorial, and run your first production agent in minutes.
   </Card>
-    <Card
-    title="Set up navigation"
-    icon="map"
-    href="/essentials/navigation"
-  >
-    Organize your docs to help users find what they need and succeed with your product.
+  <Card title="Agent Architecture" icon="diagram-project" href="/architecture">
+    Explore the full production agent stack: orchestration, memory, tools, security, and deployment.
   </Card>
-  <Card
-    title="API documentation"
-    icon="terminal"
-    href="/api-reference/introduction"
-  >
-    Auto-generate API documentation from OpenAPI specifications.
+  <Card title="LangGraph Workflows" icon="sitemap" href="/frameworks/langgraph">
+    Build stateful, multi-step agent workflows using a directed graph architecture.
   </Card>
-</Columns>
+</CardGroup>
 
-## Create beautiful pages
+## Explore by topic
 
-Everything you need to create world-class documentation.
+<CardGroup cols={2}>
+  <Card title="Agent Frameworks" icon="puzzle-piece" href="/frameworks/langgraph">
+    LangGraph, FastAPI, MCP, and Kotlin Koog — frameworks for orchestrating agent logic and exposing it as APIs.
+  </Card>
+  <Card title="Memory & Knowledge" icon="brain" href="/memory/redis-memory">
+    Redis dual-memory, Mem0 hybrid storage, Cognee knowledge graphs, and RAG with Contextual AI.
+  </Card>
+  <Card title="Tool Integration & Data" icon="plug" href="/tools/secure-tool-calling">
+    Secure tool calling via Arcade, real-time web search with Tavily, and large-scale web data with Bright Data.
+  </Card>
+  <Card title="Deployment" icon="server" href="/deployment/docker">
+    Docker containerization, AWS Bedrock AgentCore, on-premises Ollama, and GPU cloud with RunPod.
+  </Card>
+  <Card title="Observability & Quality" icon="chart-line" href="/observability/tracing-langsmith">
+    LangSmith tracing, IntellAgent evaluation, LlamaFirewall security, fine-tuning, and multi-agent A2A protocol.
+  </Card>
+  <Card title="Security" icon="shield-halved" href="/observability/security-llamafirewall">
+    Input/output guardrails, prompt injection defenses, and automated security testing for production agents.
+  </Card>
+</CardGroup>
 
-<Columns cols={2}>
-  <Card
-    title="Write with MDX"
-    icon="pen-fancy"
-    href="/essentials/markdown"
-  >
-    Use MDX to style your docs pages.
-  </Card>
-  <Card
-    title="Code samples"
-    icon="code"
-    href="/essentials/code"
-  >
-    Add sample code to demonstrate how to use your product.
-  </Card>
-  <Card
-    title="Images"
-    icon="image"
-    href="/essentials/images"
-  >
-    Display images and other media.
-  </Card>
-  <Card
-    title="Reusable snippets"
-    icon="recycle"
-    href="/essentials/reusable-snippets"
-  >
-    Write once and reuse across your docs.
-  </Card>
-</Columns>
+## Get running quickly
 
-## Make your content agent ready
+<Steps>
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/NirDiamant/agents-towards-production.git
+    cd agents-towards-production
+    ```
+  </Step>
+  <Step title="Choose a tutorial">
+    Navigate to the tutorial directory matching the component you want to learn — for example, `tutorials/LangGraph-agent` for stateful workflows or `tutorials/agent-memory-with-redis` for memory systems.
+  </Step>
+  <Step title="Install dependencies">
+    ```bash
+    pip install -r requirements.txt
+    ```
+  </Step>
+  <Step title="Run the tutorial">
+    ```bash
+    # Interactive notebook for experimentation
+    jupyter notebook tutorial.ipynb
 
-Make your docs work for humans and AI agents alike.
+    # Or run the production script directly
+    python app.py
+    ```
+  </Step>
+</Steps>
 
-<Columns cols={2}>
-  <Card
-    title="Prompt component"
-    icon="robot"
-    href="/agent-ready/prompt"
-  >
-    Embed shareable AI prompts readers can copy or open in Cursor.
-  </Card>
-  <Card
-    title="Visibility"
-    icon="eye"
-    href="/agent-ready/visibility"
-  >
-    Show different content to humans and agents reading your docs.
-  </Card>
-  <Card
-    title="Contextual menu"
-    icon="bolt"
-    href="/agent-ready/contextual"
-  >
-    Give readers one-click access to Claude, ChatGPT, Cursor, and more.
-  </Card>
-  <Card
-    title="AI coding tools"
-    icon="wand-magic-sparkles"
-    href="/ai-tools/claude-code"
-  >
-    Set up Claude Code, Cursor, or Windsurf with Mintlify's skill.
-  </Card>
-</Columns>
-
-## Need inspiration?
-
-<Card
-  title="See complete examples"
-  icon="stars"
-  href="https://mintlify.com/customers"
->
-  Browse our showcase of exceptional documentation sites.
-</Card>
+<Note>
+  Each tutorial is self-contained with its own dependencies and README. You can jump directly to any tutorial without completing others first.
+</Note>

@@ -1,0 +1,235 @@
+---
+title: "Production agent architecture: the full stack"
+description: "A layer-by-layer breakdown of the production AI agent stack — orchestration, memory, tools, security, observability, and deployment — with links to tutorials."
+---
+
+A production agent is more than a prompt and a model call. It is a system of interconnected components that must work reliably under real load, with real users, over time. This page maps the full stack and explains what each layer does, why it matters, and which tutorials cover it.
+
+<Note>
+  The architecture diagram in the repository (`assets/repos_images/ai_architecture_diagram.svg`) shows how these layers connect into a single production workflow. Each tutorial in the repository targets one or more of these layers.
+</Note>
+
+## The production agent stack
+
+A complete production agent stack has six layers. Each layer is independent enough to be learned separately, but all six must be present before you can call a system production-ready.
+
+<CardGroup cols={2}>
+  <Card title="Orchestration" icon="sitemap">
+    Controls how the agent reasons, routes between steps, and manages multi-turn state. This is the core logic layer.
+  </Card>
+  <Card title="Memory" icon="brain">
+    Gives the agent access to past context — short-term session state, long-term user preferences, and semantic knowledge retrieval.
+  </Card>
+  <Card title="Tools" icon="plug">
+    Connects the agent to external services, APIs, and data sources it can act on — web search, databases, productivity apps, and more.
+  </Card>
+  <Card title="Security" icon="shield-halved">
+    Protects the agent and its users from prompt injection, data leakage, unauthorized tool access, and adversarial inputs.
+  </Card>
+  <Card title="Observability" icon="chart-line">
+    Makes agent behavior visible and debuggable — traces, evaluation metrics, and automated quality checks.
+  </Card>
+  <Card title="Deployment" icon="server">
+    Packages and scales the agent as a service — containers, cloud infrastructure, GPU environments, and API endpoints.
+  </Card>
+</CardGroup>
+
+---
+
+## Layer 1: Orchestration
+
+Orchestration is how you define what the agent does, in what order, and under what conditions. Without explicit orchestration, agents become unpredictable as complexity grows.
+
+Production orchestration means:
+- **Stateful graphs** — the agent carries context across steps rather than starting fresh on each turn
+- **Conditional routing** — different inputs trigger different processing paths
+- **Composable nodes** — each capability is an isolated, testable unit
+
+<CardGroup cols={2}>
+  <Card title="LangGraph workflows" icon="sitemap" href="https://github.com/NirDiamant/agents-towards-production/tree/main/tutorials/LangGraph-agent">
+    Build a stateful, multi-step text analysis pipeline using directed graph architecture.
+  </Card>
+  <Card title="FastAPI agent endpoints" icon="bolt" href="https://github.com/NirDiamant/agents-towards-production/tree/main/tutorials/fastapi-agent">
+    Expose your orchestration layer as a REST API with both synchronous and streaming responses.
+  </Card>
+  <Card title="Model Context Protocol (MCP)" icon="plug" href="https://github.com/NirDiamant/agents-towards-production/tree/main/tutorials/agent-with-mcp">
+    Standardize how your agent connects to and calls external tools and APIs.
+  </Card>
+  <Card title="Kotlin agents with Koog" icon="code" href="https://github.com/NirDiamant/agents-towards-production/tree/main/tutorials/kotlin-agent-with-koog">
+    Build and orchestrate agents on the JVM using JetBrains' Koog framework.
+  </Card>
+</CardGroup>
+
+---
+
+## Layer 2: Memory
+
+An agent without memory repeats itself, forgets context, and cannot learn from interactions. Memory in production takes three forms:
+
+<Tabs>
+  <Tab title="Short-term memory">
+    Within-session state — what the agent has said and done in the current conversation. In LangGraph, this is the typed `State` object that flows through each node in the graph.
+  </Tab>
+  <Tab title="Long-term memory">
+    Cross-session persistence — user preferences, learned facts, conversation history stored in a vector or graph database and retrieved when relevant.
+  </Tab>
+  <Tab title="Semantic retrieval (RAG)">
+    On-demand knowledge access — retrieving relevant documents or facts from a large corpus using vector similarity search. This is how agents answer questions beyond their training data.
+  </Tab>
+</Tabs>
+
+<CardGroup cols={2}>
+  <Card title="Dual-memory with Redis" icon="database" href="https://github.com/NirDiamant/agents-towards-production/tree/main/tutorials/agent-memory-with-redis">
+    Implement short-term and long-term memory with semantic search and persistent vector storage.
+  </Card>
+  <Card title="Self-improving memory with Mem0" icon="brain" href="https://github.com/NirDiamant/agents-towards-production/tree/main/tutorials/agent-memory-with-mem0">
+    Build hybrid vector-and-graph memory that automatically resolves conflicts and evolves over time.
+  </Card>
+  <Card title="Knowledge graphs with Cognee" icon="circle-nodes" href="https://github.com/NirDiamant/agents-towards-production/tree/main/tutorials/ai-memory-with-cognee">
+    Transform unstructured data into structured knowledge graphs the agent can reason over.
+  </Card>
+  <Card title="Enterprise RAG with Contextual AI" icon="magnifying-glass" href="https://github.com/NirDiamant/agents-towards-production/tree/main/tutorials/agent-RAG-with-Contextual">
+    Deploy a managed RAG pipeline with intelligent indexing, agent integration, and LMUnit evaluation.
+  </Card>
+</CardGroup>
+
+---
+
+## Layer 3: Tools
+
+Tools are how agents take action. A tool-equipped agent can search the web, read a database, send a message, call an API, or scrape a website — not just generate text.
+
+Production tool use requires more than a function call. You need:
+- **Authentication** — tools often act on behalf of specific users with scoped permissions
+- **Human-in-the-loop controls** — some tool calls should require approval before execution
+- **Data quality** — external data must be clean, structured, and up to date
+
+<CardGroup cols={2}>
+  <Card title="Secure tool calling with Arcade" icon="lock" href="https://github.com/NirDiamant/agents-towards-production/tree/main/tutorials/arcade-secure-tool-calling">
+    Integrate Gmail, Slack, and Notion with OAuth2 authentication and user-level approval workflows.
+  </Card>
+  <Card title="Real-time web search with Tavily" icon="globe" href="https://github.com/NirDiamant/agents-towards-production/tree/main/tutorials/agent-with-tavily-web-access">
+    Give the agent live web access for research, monitoring, and current-events queries.
+  </Card>
+  <Card title="Large-scale web data with Bright Data" icon="spider" href="https://github.com/NirDiamant/agents-towards-production/tree/main/tutorials/agent-with-brightdata">
+    Collect structured data from complex websites at scale using enterprise proxy infrastructure.
+  </Card>
+</CardGroup>
+
+---
+
+## Layer 4: Security
+
+Security is not an afterthought in production agents. Agents that can call tools, read databases, and generate content on behalf of users are high-value attack targets.
+
+<Warning>
+  Security tools require ethical use with proper authorization. Always test security capabilities in isolated environments and never run attack simulations against systems you do not own.
+</Warning>
+
+The primary threats in production agent systems are:
+
+<AccordionGroup>
+  <Accordion title="Prompt injection">
+    Malicious content in user input or retrieved documents that hijacks the agent's instructions. Defense requires input sanitization, output filtering, and structural separation between data and instructions.
+  </Accordion>
+  <Accordion title="Tool misuse and privilege escalation">
+    An agent that can call external APIs may be manipulated into making unauthorized calls. Scoped OAuth2 permissions and human-in-the-loop approval gates limit blast radius.
+  </Accordion>
+  <Accordion title="Data leakage through outputs">
+    Sensitive information retrieved from memory or tool calls can leak into responses. Output guardrails scan for PII, credentials, and other sensitive content before returning responses to users.
+  </Accordion>
+  <Accordion title="Behavior misalignment">
+    Agents can generate responses that are unsafe, off-topic, or violate policy even without explicit attacks. Behavior alignment layers monitor outputs against defined policies.
+  </Accordion>
+</AccordionGroup>
+
+<CardGroup cols={2}>
+  <Card title="LlamaFirewall guardrails" icon="fire-flame-curved" href="https://github.com/NirDiamant/agents-towards-production/tree/main/tutorials/agent-security-with-llamafirewall">
+    Apply comprehensive input, output, and tool-access security guardrails to a production agent.
+  </Card>
+  <Card title="Security testing with Apex" icon="shield-halved" href="https://github.com/NirDiamant/agents-towards-production/tree/main/tutorials/agent-security-apex">
+    Run prompt injection attacks and automated security testing to find and fix vulnerabilities.
+  </Card>
+</CardGroup>
+
+---
+
+## Layer 5: Observability
+
+You cannot improve what you cannot measure. Observability in agent systems means capturing enough structured data to understand why the agent made each decision — and to catch regressions before users do.
+
+Observability covers three distinct concerns:
+
+<CardGroup cols={3}>
+  <Card title="Tracing" icon="magnifying-glass-chart">
+    Capturing the full execution path of each agent run — which nodes executed, what inputs they received, what outputs they produced, and how long each step took.
+  </Card>
+  <Card title="Evaluation" icon="chart-bar">
+    Automatically scoring agent outputs against expected behavior, using behavioral analysis and performance metrics to track quality over time.
+  </Card>
+  <Card title="Fine-tuning" icon="sliders">
+    Adapting the underlying model to your specific domain using evaluation data, improving accuracy and reducing inference cost for specialized tasks.
+  </Card>
+</CardGroup>
+
+<CardGroup cols={2}>
+  <Card title="Tracing with LangSmith" icon="magnifying-glass-chart" href="https://github.com/NirDiamant/agents-towards-production/tree/main/tutorials/tracing-with-langsmith">
+    Add comprehensive observability to capture traces, decision points, and timing across every agent run.
+  </Card>
+  <Card title="Evaluation with IntellAgent" icon="chart-bar" href="https://github.com/NirDiamant/agents-towards-production/tree/main/tutorials/agent-evaluation-intellagent">
+    Automate behavioral analysis and generate actionable insights to improve agent quality continuously.
+  </Card>
+  <Card title="Fine-tuning for domain expertise" icon="sliders" href="https://github.com/NirDiamant/agents-towards-production/tree/main/tutorials/fine-tuning-agents">
+    Fine-tune a language model for specialized agent behavior with data preparation, training, and evaluation.
+  </Card>
+  <Card title="Multi-agent coordination (A2A)" icon="arrows-left-right" href="https://github.com/NirDiamant/agents-towards-production/tree/main/tutorials/a2a">
+    Simulate collaborative multi-agent workflows using open communication protocols for interoperability.
+  </Card>
+</CardGroup>
+
+---
+
+## Layer 6: Deployment
+
+An agent that only runs on your laptop is not in production. Deployment turns your agent into a service — packaged, scalable, and accessible to users.
+
+<CardGroup cols={2}>
+  <Card title="Docker containerization" icon="box" href="https://github.com/NirDiamant/agents-towards-production/tree/main/tutorials/docker-intro">
+    Package your agent as a container for consistent, reproducible deployments across any environment.
+  </Card>
+  <Card title="AWS Bedrock AgentCore" icon="cloud" href="https://github.com/NirDiamant/agents-towards-production/tree/main/tutorials/aws_agentcore">
+    Deploy agents as managed services on AWS with automatic infrastructure and request tracking.
+  </Card>
+  <Card title="On-premises LLMs with Ollama" icon="server" href="https://github.com/NirDiamant/agents-towards-production/tree/main/tutorials/on-prem-llm-ollama">
+    Replace cloud API calls with local models for data privacy, cost control, and lower latency.
+  </Card>
+  <Card title="GPU cloud with RunPod" icon="microchip" href="https://github.com/NirDiamant/agents-towards-production/tree/main/tutorials/runpod-gpu-deploy">
+    Scale compute-intensive agent workloads on cost-effective GPU infrastructure.
+  </Card>
+</CardGroup>
+
+---
+
+## Putting the stack together
+
+No single tutorial covers the entire stack, but by working through tutorials across all six layers you will have hands-on experience with each component. A typical production agent combines:
+
+1. **LangGraph** for stateful orchestration
+2. **Redis or Mem0** for persistent memory
+3. **Arcade or MCP** for secure tool access
+4. **LlamaFirewall** for input/output guardrails
+5. **LangSmith** for tracing and debugging
+6. **Docker** or **AWS Bedrock** for deployment
+
+<Tip>
+  Start with the [Quickstart](/quickstart) to run the LangGraph tutorial, then follow the layer that is most relevant to your current project.
+</Tip>
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Run your first tutorial in under ten minutes.
+  </Card>
+  <Card title="All tutorials" icon="book-open" href="/introduction">
+    Browse all 22 tutorials and choose where to start.
+  </Card>
+</CardGroup>
